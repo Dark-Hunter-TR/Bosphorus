@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bosphorus-core",
+    "crates/bosphorus-divert",
+    "crates/bosphorus-cli",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "local"
+
+[workspace.dependencies]
+windows = { version = "0.48", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+] }
+thiserror = "1"
+anyhow = "1"
+
+# --- build profiles ---------------------------------------------------------
+#
+# `release`: the day-to-day optimized build. Fast enough to iterate on.
+#   panic = "unwind" is DELIBERATE and load-bearing: the clean shutdown path
+#   (SCM SERVICE_STOPPED, Engine::persist_now, WinDivertHandle::Drop ->
+#   WinDivertClose) all run in destructors / after run_main returns. panic =
+#   "abort" would skip every one of them and hand SCM an unclean stop.
+#   The per-packet loop body is wrapped in catch_unwind so a single malformed
+#   packet degrades to "log one line and continue", not process death.
+[profile.release]
+opt-level     = 3            # recv -> process -> inject is a throughput hot path
+lto           = "thin"       # cross-crate inlining (packet/strategy code is static)
+codegen-units = 1            # ~35-file workspace; full rebuild is seconds
+panic         = "unwind"     # see note above — do NOT change to "abort"
+strip         = "debuginfo"  # drop DWARF/CodeView, keep the symbol table
+
+# `release-dist`: the shipped artifact. Same semantics as `release` (still
+# unwind), traded build time for a smaller/faster binary. Build with
+# `cargo build --profile release-dist`.
+[profile.release-dist]
+inherits = "release"
+lto      = "fat"
+strip    = "symbols"
+
+# Optimize dependencies (windivert-sys, serde_json, ...) even in dev builds so
+# a debug run of the capture loop isn't glacial. Our own crates stay unoptimized.
+[profile.dev.package."*"]
+opt-level = 2

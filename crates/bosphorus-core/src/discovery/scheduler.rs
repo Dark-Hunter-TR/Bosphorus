@@ -1,0 +1,589 @@
+use std::time::Instant;
+
+use crate::config::DiscoveryTuning;
+use crate::conntrack::FlowOutcome;
+use crate::profile::{NetPhase, ScoredStrategy, TargetState, TrialKind};
+use crate::strategy::generator::is_overlap_family;
+use crate::strategy::{DefaultGenerator, Strategy, StrategyId};
+
+use super::verdict;
+
+/// Candidate acceptance gate for a target. Overlap-family strategies feed the
+/// server junk bytes in the overlap region; a first-received-wins server
+/// (guessed initial TTL 128 = Windows) would keep them and break the handshake.
+fn accept_for(server_initial_ttl: Option<u8>) -> impl Fn(&Strategy) -> bool {
+    move |s: &Strategy| !(server_initial_ttl == Some(128) && is_overlap_family(s))
+}
+
+/// What the scheduler wants tried next for a target.
+pub struct Assignment {
+    /// `None` = passthrough control (no mutation).
+    pub id: Option<StrategyId>,
+    pub strategy: Option<Strategy>,
+    pub kind: TrialKind,
+    /// A state transition this `assign` caused that the caller should log
+    /// (`Exhausted` when the sweep ran out here, `Revived` when a grid bump put
+    /// an exhausted target back into `Discover`). Transitions caused by a
+    /// verdict come from [`Scheduler::record`] instead.
+    pub event: Option<DiscoveryEvent>,
+}
+
+/// The state transition a `record` caused (for logging).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryEvent {
+    /// Probe succeeded — target is not blocked.
+    NotBlocked,
+    /// Probe failed — target is blocked; grid sweep begins.
+    Blocked,
+    /// A candidate failed; moving to the next.
+    NextCandidate { tried: usize, total: usize },
+    /// A candidate reached the promotion threshold.
+    Promoted { strategy: String, after: u8 },
+    /// The active strategy failed too many times; back to discovery.
+    Demoted { strategy: String },
+    /// Every grid candidate was tried and none worked.
+    Exhausted { tried: usize },
+    /// The live grid grew past what was swept at exhaustion; the target
+    /// re-entered `Discover` (with `tried` preserved).
+    Revived { new_total: usize, untried: usize },
+    /// Active strategy had a transient failure.
+    ActiveFailure { count: u8 },
+    /// Nothing changed (e.g. `Inconclusive`).
+    Noted,
+}
+
+pub struct Scheduler {
+    pub tuning: DiscoveryTuning,
+}
+
+impl Scheduler {
+    /// Pick the next trial for `ts`.
+    pub fn assign(
+        &self,
+        ts: &mut TargetState,
+        gen: &DefaultGenerator,
+        now: Instant,
+    ) -> Assignment {
+        ts.expire_in_flight(now, self.tuning.in_flight_ttl);
+        let revived = Self::revive_if_grid_grew(ts, gen);
+
+        let mut a = match ts.phase {
+            NetPhase::Probe => {
+                Assignment { id: None, strategy: None, kind: TrialKind::Control, event: None }
+            }
+            NetPhase::Active => match ts.active {
+                None => {
+                    Assignment { id: None, strategy: None, kind: TrialKind::Exploit, event: None }
+                }
+                Some(sid) => Assignment {
+                    id: Some(sid),
+                    strategy: ts.scores.get(&sid).map(|s| s.strategy.clone()),
+                    kind: TrialKind::Exploit,
+                    event: None,
+                },
+            },
+            NetPhase::Discover => {
+                let accept = accept_for(ts.server_initial_ttl);
+                match gen.next_candidate(&ts.skip_ids(), &accept) {
+                    Some(s) => Assignment {
+                        id: Some(s.id()),
+                        strategy: Some(s.clone()),
+                        kind: TrialKind::Explore,
+                        event: None,
+                    },
+                    None => {
+                        // Nothing to hand out. Either every candidate is truly
+                        // ruled out (-> Exhausted), or the rest are just
+                        // in-flight on sibling connections (-> passthrough this
+                        // one, stay in Discover).
+                        if gen.next_candidate(&ts.tried, &accept).is_none() {
+                            ts.phase = NetPhase::Exhausted;
+                            ts.grid_size_at_exhaustion = Some(gen.len());
+                            let tried = ts.tried.len();
+                            ts.compact();
+                            Assignment {
+                                id: None,
+                                strategy: None,
+                                kind: TrialKind::Control,
+                                event: Some(DiscoveryEvent::Exhausted { tried }),
+                            }
+                        } else {
+                            Assignment {
+                                id: None,
+                                strategy: None,
+                                kind: TrialKind::Control,
+                                event: None,
+                            }
+                        }
+                    }
+                }
+            }
+            NetPhase::Exhausted => {
+                Assignment { id: None, strategy: None, kind: TrialKind::Control, event: None }
+            }
+        };
+
+        if revived.is_some() {
+            a.event = revived;
+        }
+        ts.mark_assigned(a.id, now);
+        a
+    }
+
+    /// If `ts` is `Exhausted` and the live grid is now larger than it was when
+    /// the sweep ran out, return it to `Discover` with `tried` preserved (only
+    /// not-yet-tried candidates will be picked). Returns the `Revived` event.
+    ///
+    /// Dormant within a single run: the generator is immutable, so this only
+    /// ever fires once M8 reloads a persisted `TargetState` under a bigger grid.
+    fn revive_if_grid_grew(
+        ts: &mut TargetState,
+        gen: &DefaultGenerator,
+    ) -> Option<DiscoveryEvent> {
+        if ts.phase != NetPhase::Exhausted {
+            return None;
+        }
+        let prev = ts.grid_size_at_exhaustion?;
+        if gen.len() <= prev {
+            return None;
+        }
+        ts.phase = NetPhase::Discover;
+        ts.grid_size_at_exhaustion = None;
+        ts.consecutive_success = 0;
+        ts.consecutive_failure = 0;
+        let untried = gen.all().iter().filter(|s| !ts.tried.contains(&s.id())).count();
+        Some(DiscoveryEvent::Revived { new_total: gen.len(), untried })
+    }
+
+    /// Feed back a flow's verdict.
+    pub fn record(
+        &self,
+        ts: &mut TargetState,
+        gen: &DefaultGenerator,
+        id: Option<StrategyId>,
+        outcome: FlowOutcome,
+        now: Instant,
+    ) -> DiscoveryEvent {
+        ts.updated_at = now;
+        let ok = verdict::is_success(outcome);
+        let fail = verdict::is_failure(outcome);
+        if !ok && !fail {
+            return DiscoveryEvent::Noted; // Inconclusive
+        }
+
+        if let Some(sid) = id {
+            let strat = gen
+                .all()
+                .iter()
+                .find(|s| s.id() == sid)
+                .cloned()
+                .unwrap_or_else(Strategy::m4_fixed);
+            ts.scores
+                .entry(sid)
+                .or_insert_with(|| ScoredStrategy::new(strat))
+                .note(ok, now);
+            // Its verdict is in — it no longer blocks a sibling connection.
+            ts.clear_in_flight(sid);
+        }
+
+        match ts.phase {
+            NetPhase::Probe => {
+                ts.consecutive_success = 0;
+                ts.consecutive_failure = 0;
+                if ok {
+                    ts.phase = NetPhase::Active;
+                    ts.active = None;
+                    DiscoveryEvent::NotBlocked
+                } else {
+                    ts.phase = NetPhase::Discover;
+                    DiscoveryEvent::Blocked
+                }
+            }
+            NetPhase::Discover => {
+                if ok {
+                    ts.consecutive_failure = 0;
+                    ts.consecutive_success = ts.consecutive_success.saturating_add(1);
+                    if let Some(sid) = id {
+                        if ts.consecutive_success >= self.tuning.promote_after_success {
+                            ts.phase = NetPhase::Active;
+                            ts.active = Some(sid);
+                            ts.in_flight.clear();
+                            let strategy = ts
+                                .scores
+                                .get(&sid)
+                                .map(|s| s.strategy.describe())
+                                .unwrap_or_default();
+                            ts.compact(); // keep only the promoted strategy's score
+                            return DiscoveryEvent::Promoted {
+                                strategy,
+                                after: ts.consecutive_success,
+                            };
+                        }
+                    }
+                    DiscoveryEvent::Noted
+                } else {
+                    ts.consecutive_success = 0;
+                    if let Some(sid) = id {
+                        if !ts.tried.contains(&sid) {
+                            ts.tried.push(sid);
+                        }
+                    }
+                    if gen
+                        .next_candidate(&ts.tried, &accept_for(ts.server_initial_ttl))
+                        .is_none()
+                    {
+                        ts.phase = NetPhase::Exhausted;
+                        ts.grid_size_at_exhaustion = Some(gen.len());
+                        let tried = ts.tried.len();
+                        ts.compact();
+                        DiscoveryEvent::Exhausted { tried }
+                    } else {
+                        DiscoveryEvent::NextCandidate { tried: ts.tried.len(), total: gen.len() }
+                    }
+                }
+            }
+            NetPhase::Active => {
+                if ok {
+                    ts.consecutive_failure = 0;
+                    DiscoveryEvent::Noted
+                } else {
+                    ts.consecutive_failure = ts.consecutive_failure.saturating_add(1);
+                    if ts.consecutive_failure >= self.tuning.demote_after_failure {
+                        let strategy = ts
+                            .active
+                            .and_then(|sid| ts.scores.get(&sid))
+                            .map(|s| s.strategy.describe())
+                            .unwrap_or_default();
+                        ts.phase = NetPhase::Discover;
+                        ts.active = None;
+                        ts.tried.clear();
+                        ts.in_flight.clear();
+                        ts.consecutive_failure = 0;
+                        ts.consecutive_success = 0;
+                        ts.compact(); // active = None -> drops every stale score
+                        DiscoveryEvent::Demoted { strategy }
+                    } else {
+                        DiscoveryEvent::ActiveFailure { count: ts.consecutive_failure }
+                    }
+                }
+            }
+            NetPhase::Exhausted => DiscoveryEvent::Noted,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::EvasionConfig;
+    use crate::strategy::generator::{DesyncKind, GridAxes};
+    use crate::strategy::model::{SendOrder, SplitAnchor};
+    use std::time::Duration;
+
+    /// `n` candidates: `frag@<off>` for each offset, all wrong-seq.
+    fn tiny_gen_n(offsets: &[u16]) -> DefaultGenerator {
+        DefaultGenerator::with_axes(&GridAxes {
+            frag_anchor: offsets.iter().map(|o| Some(SplitAnchor::AbsoluteOffset(*o))).collect(),
+            frag_reverse: vec![false],
+            desync: vec![DesyncKind::WrongSeq],
+            repeats: vec![1],
+            order: vec![SendOrder::FakeThenReal],
+            frag_multi: vec![],
+            overlap_anchors: vec![],
+            overlap_seqovl: vec![],
+            tls_pad_anchors: vec![],
+            tls_pad_desync: vec![],
+            aggressive_fake_anchors: vec![],
+            aggressive_fake_desync: vec![],
+        })
+    }
+
+    fn tiny_gen() -> DefaultGenerator {
+        // 2 candidates only: frag@2 and frag@3, both with wrong-seq.
+        tiny_gen_n(&[2, 3])
+    }
+
+    fn sched() -> Scheduler {
+        Scheduler { tuning: EvasionConfig::default().discovery }
+    }
+
+    fn now() -> Instant {
+        Instant::now()
+    }
+
+    /// Drive `ts` from fresh to `Exhausted` against `g`.
+    fn exhaust(s: &Scheduler, ts: &mut TargetState, g: &DefaultGenerator, t: Instant) {
+        s.assign(ts, g, t);
+        s.record(ts, g, None, FlowOutcome::DpiReset, t); // Probe -> Discover
+        loop {
+            let a = s.assign(ts, g, t);
+            match a.id {
+                Some(id) => {
+                    s.record(ts, g, Some(id), FlowOutcome::DpiReset, t);
+                }
+                None => break,
+            }
+        }
+    }
+
+    #[test]
+    fn probe_success_marks_not_blocked() {
+        let g = tiny_gen();
+        let s = sched();
+        let mut ts = TargetState::new("open.example".into(), now());
+
+        let a = s.assign(&mut ts, &g, now());
+        assert_eq!(a.kind, TrialKind::Control);
+        assert!(a.strategy.is_none());
+
+        let ev = s.record(&mut ts, &g, None, FlowOutcome::Success, now());
+        assert_eq!(ev, DiscoveryEvent::NotBlocked);
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.active, None);
+    }
+
+    #[test]
+    fn blocked_target_finds_and_promotes_a_working_candidate() {
+        let g = tiny_gen();
+        let s = sched(); // promote_after_success = 2
+        let mut ts = TargetState::new("blocked.example".into(), now());
+
+        // Probe fails -> Blocked / Discover.
+        s.assign(&mut ts, &g, now());
+        assert_eq!(s.record(&mut ts, &g, None, FlowOutcome::DpiReset, now()), DiscoveryEvent::Blocked);
+        assert_eq!(ts.phase, NetPhase::Discover);
+
+        // candidate 0 fails -> NextCandidate.
+        let a0 = s.assign(&mut ts, &g, now());
+        assert_eq!(a0.kind, TrialKind::Explore);
+        let id0 = a0.id.unwrap();
+        assert!(matches!(
+            s.record(&mut ts, &g, Some(id0), FlowOutcome::DpiReset, now()),
+            DiscoveryEvent::NextCandidate { .. }
+        ));
+
+        // candidate 1 succeeds twice -> Promoted.
+        let a1 = s.assign(&mut ts, &g, now());
+        let id1 = a1.id.unwrap();
+        assert_ne!(id0, id1);
+        assert_eq!(s.record(&mut ts, &g, Some(id1), FlowOutcome::Success, now()), DiscoveryEvent::Noted);
+        let ev = s.record(&mut ts, &g, Some(id1), FlowOutcome::Success, now());
+        assert!(matches!(ev, DiscoveryEvent::Promoted { .. }));
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.active, Some(id1));
+
+        // Active demotes after 3 failures.
+        for i in 1..=3 {
+            let a = s.assign(&mut ts, &g, now());
+            assert_eq!(a.kind, TrialKind::Exploit);
+            let ev = s.record(&mut ts, &g, a.id, FlowOutcome::DpiReset, now());
+            if i < 3 {
+                assert_eq!(ev, DiscoveryEvent::ActiveFailure { count: i });
+            } else {
+                assert!(matches!(ev, DiscoveryEvent::Demoted { .. }));
+            }
+        }
+        assert_eq!(ts.phase, NetPhase::Discover);
+        assert!(ts.tried.is_empty(), "demote clears tried for a fresh sweep");
+    }
+
+    #[test]
+    fn all_candidates_fail_leads_to_exhausted() {
+        let g = tiny_gen(); // 2 candidates
+        let s = sched();
+        let mut ts = TargetState::new("stubborn.example".into(), now());
+
+        s.assign(&mut ts, &g, now());
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, now()); // Blocked
+
+        let a0 = s.assign(&mut ts, &g, now());
+        assert!(matches!(
+            s.record(&mut ts, &g, a0.id, FlowOutcome::DpiReset, now()),
+            DiscoveryEvent::NextCandidate { .. }
+        ));
+        let a1 = s.assign(&mut ts, &g, now());
+        let ev = s.record(&mut ts, &g, a1.id, FlowOutcome::Blackhole, now());
+        assert_eq!(ev, DiscoveryEvent::Exhausted { tried: 2 });
+        assert_eq!(ts.phase, NetPhase::Exhausted);
+
+        // Further assigns are inert controls.
+        let a2 = s.assign(&mut ts, &g, now());
+        assert!(a2.strategy.is_none() && a2.kind == TrialKind::Control);
+    }
+
+    // --- M7d: parallel sweep ---
+
+    #[test]
+    fn concurrent_assigns_get_distinct_candidates() {
+        let (g, s) = (tiny_gen(), sched());
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0); // -> Discover
+
+        let a = s.assign(&mut ts, &g, t0);
+        let b = s.assign(&mut ts, &g, t0);
+        assert_ne!(a.id.unwrap(), b.id.unwrap(), "two unresolved trials explore different candidates");
+        assert_eq!(ts.in_flight.len(), 2);
+    }
+
+    #[test]
+    fn record_clears_in_flight_and_moves_on() {
+        let (g, s) = (tiny_gen(), sched());
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0);
+
+        let a = s.assign(&mut ts, &g, t0);
+        let id0 = a.id.unwrap();
+        assert_eq!(ts.in_flight.len(), 1);
+
+        s.record(&mut ts, &g, Some(id0), FlowOutcome::DpiReset, t0);
+        assert!(ts.in_flight.is_empty());
+        assert!(ts.tried.contains(&id0));
+
+        let b = s.assign(&mut ts, &g, t0);
+        assert_ne!(b.id.unwrap(), id0);
+    }
+
+    #[test]
+    fn in_flight_expires_and_the_candidate_returns() {
+        let (g, s) = (tiny_gen(), sched()); // in_flight_ttl = 15s
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0);
+
+        let id0 = s.assign(&mut ts, &g, t0).id.unwrap();
+        let id1 = s.assign(&mut ts, &g, t0).id.unwrap();
+        assert_ne!(id0, id1);
+
+        // 16s later both unresolved trials have expired; the sweep re-offers id0.
+        let later = t0 + Duration::from_secs(16);
+        assert_eq!(s.assign(&mut ts, &g, later).id, Some(id0));
+    }
+
+    #[test]
+    fn saturated_in_flight_passes_through_without_exhausting() {
+        let (g, s) = (tiny_gen(), sched()); // 2 candidates
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0);
+
+        assert!(s.assign(&mut ts, &g, t0).id.is_some());
+        assert!(s.assign(&mut ts, &g, t0).id.is_some());
+
+        // Third concurrent connection: nothing free, but nothing has failed.
+        let c = s.assign(&mut ts, &g, t0);
+        assert!(c.id.is_none() && c.strategy.is_none() && c.kind == TrialKind::Control);
+        assert!(c.event.is_none());
+        assert_eq!(ts.phase, NetPhase::Discover, "not exhausted — the rest are just in flight");
+    }
+
+    // --- M7d: grid-growth revival ---
+
+    #[test]
+    fn exhausted_target_revives_when_the_grid_grows() {
+        let s = sched();
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+
+        exhaust(&s, &mut ts, &tiny_gen_n(&[2, 3]), t0);
+        assert_eq!(ts.phase, NetPhase::Exhausted);
+        assert_eq!(ts.grid_size_at_exhaustion, Some(2));
+        assert_eq!(ts.tried.len(), 2);
+
+        // Next assign sees a 3-candidate grid -> revived, tried preserved.
+        let g3 = tiny_gen_n(&[2, 3, 4]);
+        let a = s.assign(&mut ts, &g3, t0);
+        assert_eq!(ts.phase, NetPhase::Discover);
+        assert_eq!(ts.tried.len(), 2, "tried is NOT cleared");
+        assert!(matches!(
+            a.event,
+            Some(DiscoveryEvent::Revived { new_total: 3, untried: 1 })
+        ));
+        let fresh = a.id.expect("a candidate was handed out");
+        assert!(!ts.tried.contains(&fresh), "only a not-yet-tried candidate is picked");
+    }
+
+    #[test]
+    fn compact_on_exhaustion_drops_every_per_candidate_score() {
+        let g = tiny_gen_n(&[2, 3, 4, 5]);
+        let s = sched();
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("x".into(), t0);
+
+        exhaust(&s, &mut ts, &g, t0);
+        assert_eq!(ts.phase, NetPhase::Exhausted);
+        assert!(ts.scores.is_empty(), "exhausted target keeps no per-candidate scores");
+        assert_eq!(ts.scores.capacity(), 0, "and the map allocation is released");
+        // `tried` ids are still there (they drive grid-growth revival).
+        assert_eq!(ts.tried.len(), 4);
+        assert!(ts.best().is_none());
+    }
+
+    #[test]
+    fn compact_on_promotion_keeps_only_the_promoted_score() {
+        let g = tiny_gen_n(&[2, 3, 4, 5]);
+        let s = sched(); // promote_after_success = 2
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("y".into(), t0);
+
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0); // -> Discover
+
+        let a0 = s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, a0.id, FlowOutcome::DpiReset, t0); // cand 0 fails -> scored
+        let a1 = s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, a1.id, FlowOutcome::Success, t0);
+        let ev = s.record(&mut ts, &g, a1.id, FlowOutcome::Success, t0); // promote
+
+        assert!(matches!(ev, DiscoveryEvent::Promoted { .. }));
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.scores.len(), 1, "only the promoted strategy's score survives");
+        assert!(ts.scores.contains_key(&a1.id.unwrap()));
+        // The promoted strategy is still resolvable for the Exploit assignment.
+        let a = s.assign(&mut ts, &g, t0);
+        assert_eq!(a.id, a1.id);
+        assert!(a.strategy.is_some());
+    }
+
+    #[test]
+    fn compact_on_demotion_clears_scores() {
+        let g = tiny_gen_n(&[2, 3, 4, 5]);
+        let s = sched(); // demote_after_failure = 3
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("z".into(), t0);
+
+        // Promote cand 0, then fail it 3x -> Demoted.
+        s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t0);
+        let a0 = s.assign(&mut ts, &g, t0);
+        s.record(&mut ts, &g, a0.id, FlowOutcome::Success, t0);
+        s.record(&mut ts, &g, a0.id, FlowOutcome::Success, t0); // promote
+        for _ in 0..3 {
+            let a = s.assign(&mut ts, &g, t0);
+            s.record(&mut ts, &g, a.id, FlowOutcome::DpiReset, t0);
+        }
+        assert_eq!(ts.phase, NetPhase::Discover, "demoted");
+        assert!(ts.scores.is_empty(), "demote wipes the score map for a fresh sweep");
+        assert!(ts.tried.is_empty());
+    }
+
+    #[test]
+    fn exhausted_stays_exhausted_when_the_grid_is_unchanged() {
+        let s = sched();
+        let t0 = Instant::now();
+        let mut ts = TargetState::new("t".into(), t0);
+        let g = tiny_gen();
+
+        exhaust(&s, &mut ts, &g, t0);
+        assert_eq!(ts.phase, NetPhase::Exhausted);
+
+        let a = s.assign(&mut ts, &g, t0 + Duration::from_secs(60));
+        assert_eq!(ts.phase, NetPhase::Exhausted);
+        assert!(a.event.is_none() && a.id.is_none());
+    }
+}

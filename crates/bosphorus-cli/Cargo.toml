@@ -1,0 +1,29 @@
+[package]
+name = "bosphorus-cli"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "bosphorus"
+path = "src/main.rs"
+
+[dependencies]
+bosphorus-core = { path = "../bosphorus-core" }
+bosphorus-divert = { path = "../bosphorus-divert" }
+anyhow = { workspace = true }
+ctrlc = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+windows-service = "0.7"
+windows = { workspace = true, features = [
+    "Win32_Globalization",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_EventLog",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

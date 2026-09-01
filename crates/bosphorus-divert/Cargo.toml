@@ -1,0 +1,13 @@
+[package]
+name = "bosphorus-divert"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Thin safe wrapper around WinDivert 2.2 (windivert-sys FFI)"
+publish = false
+
+[dependencies]
+windivert-sys = "0.10"
+windows = { workspace = true }
+thiserror = { workspace = true }
