@@ -66,6 +66,19 @@ pub enum Msg {
     SvcNotInstalled,
     SvcUsage,
     PreflightHvci,
+
+    // --- interactive launcher TUI (4c) ---
+    MenuRunOnce,
+    MenuInstall,
+    MenuStatus,
+    MenuUninstall,
+    MenuLanguage,
+    MenuQuit,
+    TuiHelp,
+    TuiSvcInstalled,
+    TuiSvcNotInstalled,
+    TuiElevatedStarted,
+    TuiPressKey,
 }
 
 pub fn t(m: Msg) -> &'static str {
@@ -119,6 +132,39 @@ pub fn t(m: Msg) -> &'static str {
 
         (En, PreflightHvci) => "The WinDivert driver would not load. Likely HVCI / Memory Integrity, Smart App Control, or a WDAC policy is blocking it — the service would not start either.",
         (Tr, PreflightHvci) => "WinDivert sürücüsü yüklenemedi. Muhtemelen HVCI / Bellek Bütünlüğü, Smart App Control veya bir WDAC politikası engelliyor — servis de başlamaz.",
+
+        (En, MenuRunOnce) => "Run once (this session only)",
+        (Tr, MenuRunOnce) => "Bir kez çalıştır (yalnızca bu oturum)",
+
+        (En, MenuInstall) => "Install as a service (starts with Windows)",
+        (Tr, MenuInstall) => "Hizmet olarak kur (Windows ile başlar)",
+
+        (En, MenuStatus) => "Show service status",
+        (Tr, MenuStatus) => "Hizmet durumunu göster",
+
+        (En, MenuUninstall) => "Uninstall the service",
+        (Tr, MenuUninstall) => "Hizmeti kaldır",
+
+        (En, MenuLanguage) => "Language",
+        (Tr, MenuLanguage) => "Dil",
+
+        (En, MenuQuit) => "Quit",
+        (Tr, MenuQuit) => "Çık",
+
+        (En, TuiHelp) => "\u{2191}\u{2193} move   Enter select   L language   Q quit",
+        (Tr, TuiHelp) => "\u{2191}\u{2193} gez   Enter seç   L dil   Q çık",
+
+        (En, TuiSvcInstalled) => "Service: installed",
+        (Tr, TuiSvcInstalled) => "Hizmet: kurulu",
+
+        (En, TuiSvcNotInstalled) => "Service: not installed",
+        (Tr, TuiSvcNotInstalled) => "Hizmet: kurulu değil",
+
+        (En, TuiElevatedStarted) => "Bosphorus started in a new window. You can close this one.",
+        (Tr, TuiElevatedStarted) => "Bosphorus yeni bir pencerede başladı. Bu pencereyi kapatabilirsiniz.",
+
+        (En, TuiPressKey) => "Press Enter to close this window.",
+        (Tr, TuiPressKey) => "Bu pencereyi kapatmak için Enter'a basın.",
     }
 }
 
@@ -317,37 +363,33 @@ pub fn launcher_elevate_cancelled() -> String {
     }
 }
 
-/// Double-clicked while the service already exists.
-pub fn launcher_already_installed() -> String {
-    match get() {
-        Lang::En => "Bosphorus is already installed and manages itself.\n\n\
-                     To remove it, run in an elevated PowerShell:\n\
-                     \x20\x20\x20\x20bosphorus service uninstall --purge"
-            .into(),
-        Lang::Tr => "Bosphorus zaten kurulu ve kendini yönetiyor.\n\n\
-                     Kaldırmak için yönetici PowerShell'de:\n\
-                     \x20\x20\x20\x20bosphorus service uninstall --purge"
-            .into(),
-    }
-}
-
 /// Install succeeded (shown by the launcher / its elevated re-spawn).
 pub fn launcher_install_ok() -> String {
     match get() {
         Lang::En => "Bosphorus is installed and running.\n\n\
                      It now works fully automatically in the background and starts with Windows.\n\n\
-                     To confirm it really started, run in an elevated PowerShell:\n\
-                     \x20\x20\x20\x20Get-Service Bosphorus\n\
-                     \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
-                     \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+                     Re-open this launcher any time and choose \"Show service status\" to check on it."
             .into(),
         Lang::Tr => "Bosphorus kuruldu ve çalışıyor.\n\n\
                      Artık arka planda tamamen otomatik çalışır ve Windows ile birlikte başlar.\n\n\
-                     Gerçekten başladığını doğrulamak için yönetici PowerShell'de:\n\
-                     \x20\x20\x20\x20Get-Service Bosphorus\n\
-                     \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
-                     \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+                     Kontrol etmek için bu başlatıcıyı tekrar açıp \"Hizmet durumunu göster\"i seçin."
             .into(),
+    }
+}
+
+/// Uninstall succeeded.
+pub fn launcher_uninstall_ok() -> String {
+    match get() {
+        Lang::En => "The Bosphorus service was removed.".into(),
+        Lang::Tr => "Bosphorus hizmeti kaldırıldı.".into(),
+    }
+}
+
+/// Uninstall failed.
+pub fn launcher_uninstall_failed(err: &str) -> String {
+    match get() {
+        Lang::En => format!("The Bosphorus service could not be removed.\n\n{err}"),
+        Lang::Tr => format!("Bosphorus hizmeti kaldırılamadı.\n\n{err}"),
     }
 }
 
@@ -410,13 +452,24 @@ mod tests {
         set(Lang::En);
         assert!(launcher_install_ok().contains("installed and running"));
         assert!(launcher_install_failed("x").contains("could not be installed"));
-        assert!(launcher_already_installed().contains("uninstall --purge"));
+        assert!(launcher_uninstall_ok().contains("was removed"));
+        assert_eq!(t(Msg::MenuRunOnce), "Run once (this session only)");
 
         set(Lang::Tr);
         assert!(launcher_install_ok().contains("kuruldu ve çalışıyor"));
         assert!(launcher_install_failed("x").contains("kurulamadı"));
-        assert!(launcher_already_installed().contains("uninstall --purge"));
+        assert!(launcher_uninstall_ok().contains("kaldırıldı"));
+        assert_eq!(t(Msg::MenuRunOnce), "Bir kez çalıştır (yalnızca bu oturum)");
 
+        set(Lang::En);
+    }
+
+    #[test]
+    fn tui_help_uses_arrow_glyphs_in_both_langs() {
+        set(Lang::En);
+        assert!(t(Msg::TuiHelp).contains('\u{2191}') && t(Msg::TuiHelp).contains("quit"));
+        set(Lang::Tr);
+        assert!(t(Msg::TuiHelp).contains('\u{2191}') && t(Msg::TuiHelp).contains("çık"));
         set(Lang::En);
     }
 }

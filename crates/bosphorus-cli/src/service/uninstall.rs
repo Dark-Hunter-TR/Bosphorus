@@ -7,8 +7,18 @@ use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
-    let purge = args.iter().any(|a| a == "--purge");
+    crate::i18n::set(crate::resolve_lang(args));
+    let res = do_uninstall(args.iter().any(|a| a == "--purge"));
 
+    // Elevated re-spawn from the interactive launcher: its console is hidden,
+    // so also surface the outcome in a MessageBox.
+    if args.iter().any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG) {
+        crate::launcher::show_uninstall_result(&res);
+    }
+    res
+}
+
+fn do_uninstall(purge: bool) -> anyhow::Result<()> {
     let mgr = ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)
         .map_err(super::map_scm_err)?;
     let svc = mgr

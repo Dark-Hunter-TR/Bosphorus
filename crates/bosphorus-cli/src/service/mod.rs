@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 pub(crate) mod install;
 mod runner;
-mod status;
-mod uninstall;
+pub(crate) mod status;
+pub(crate) mod uninstall;
 
 pub const SERVICE_NAME: &str = "Bosphorus";
 pub const SERVICE_DISPLAY: &str = "Bosphorus DPI Bypass";

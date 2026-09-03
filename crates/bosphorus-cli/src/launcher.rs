@@ -1,114 +1,253 @@
-//! Double-click entry point (4b).
+//! Interactive entry point (4c).
 //!
 //! When `bosphorus.exe` is launched from Explorer — no arguments, and this
-//! process owns its console — there is no terminal to print to. Instead, guide
-//! the user through installing the Windows service: elevate through UAC if
-//! needed, run `service install`, and report the outcome in a MessageBox.
+//! process owns its console — there is no shell to type into. Instead of a
+//! plain menu we take over the console with a tiny arrow-key TUI (raw VT
+//! sequences + the Win32 Console API, no framework dependency) offering
+//! "run once" and "install as a service", with a live language toggle.
 //!
-//! Running `bosphorus` with no arguments *from a shell* is unchanged: print the
-//! CLI usage and exit 2.
+//! Both actions self-elevate through UAC (`ShellExecuteW "runas"`) when the
+//! process is not already Administrator: "run once" re-spawns `--engine` in a
+//! new window, "install"/"uninstall" re-spawns the matching `service` sub-
+//! command with `--from-launcher` so it reports its result in a MessageBox.
+//!
+//! Running `bosphorus` with no arguments *from a shell* is unchanged: print
+//! the CLI usage and exit 2.
 
 use std::ffi::{c_void, OsString};
+use std::io::Write;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
-use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+use windows::Win32::System::Console::{
+    GetConsoleMode, GetConsoleOutputCP, GetConsoleProcessList, GetStdHandle, ReadConsoleInputW,
+    SetConsoleMode, SetConsoleOutputCP, CONSOLE_MODE, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+    ENABLE_PROCESSED_INPUT, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+    INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MESSAGEBOX_STYLE, SW_HIDE,
+    SW_SHOWNORMAL,
 };
 
-use crate::i18n;
+use crate::i18n::{self, Msg};
 
-/// Internal marker appended to the elevated re-spawn's argv so that
-/// `service install` pops a MessageBox with its result (the re-spawn's console
-/// is hidden — nobody would see the printed lines).
+/// Marker appended to an elevated re-spawn's argv so the `service` sub-command
+/// pops a MessageBox with its result (the re-spawn's console is hidden).
 pub const FROM_LAUNCHER_FLAG: &str = "--from-launcher";
 
-/// What the no-arguments entry point should do.
+// --------------------------------------------------------------------------- //
+//  Pure decision layer (unit-tested)
+// --------------------------------------------------------------------------- //
+
+/// Which top-level screen the no-arguments entry point shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
-    /// Not a double-click (started from a shell): print CLI usage, exit 2.
-    ShowUsage,
-    /// Double-clicked, the service already exists: informational box, no change.
-    AlreadyInstalled,
-    /// Double-clicked, not elevated: re-spawn self elevated to install.
-    ElevateAndInstall,
-    /// Double-clicked and already elevated: install here, box the result.
-    InstallHere,
+pub enum Screen {
+    /// Started from a shell: print CLI usage and exit 2.
+    Usage,
+    /// Double-clicked: run the interactive menu.
+    Tui,
 }
 
-/// Pure routing decision. The three inputs are the only Win32 probes the
-/// launcher makes; keeping the branching here makes it unit-testable.
-pub fn decide(double_click: bool, elevated: bool, installed: bool) -> Action {
-    if !double_click {
-        return Action::ShowUsage;
-    }
-    if installed {
-        return Action::AlreadyInstalled;
-    }
-    if elevated {
-        Action::InstallHere
+/// The only routing input: did Explorer create our console (double-click) or
+/// were we started from an existing shell?
+pub fn decide(double_click: bool) -> Screen {
+    if double_click {
+        Screen::Tui
     } else {
-        Action::ElevateAndInstall
+        Screen::Usage
     }
 }
 
-/// The argv the elevated re-spawn is invoked with.
-pub fn elevated_install_args(lang: i18n::Lang) -> Vec<OsString> {
-    let code = match lang {
+/// A row in the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuItem {
+    RunOnce,
+    InstallService,
+    ShowStatus,
+    UninstallService,
+    ToggleLang,
+    Quit,
+}
+
+/// What the user picked (the render-loop swallows `ToggleLang`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherChoice {
+    RunOnce,
+    InstallService,
+    ShowStatus,
+    UninstallService,
+    Quit,
+}
+
+/// A concrete thing `run()` then does. Split from the choice so the
+/// elevate-vs-do-here fork stays a pure function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedAction {
+    RunEngineHere,
+    ElevateAndRun,
+    InstallHere,
+    ElevateAndInstall,
+    StatusHere,
+    UninstallHere,
+    ElevateAndUninstall,
+    Exit,
+}
+
+/// The menu contents + cursor. `items_for` is the whole "installed vs not"
+/// branch; keeping it a pure function is what makes it testable.
+#[derive(Debug, Clone)]
+pub struct MenuModel {
+    pub items: Vec<MenuItem>,
+    pub cursor: usize,
+}
+
+impl MenuModel {
+    pub fn new(installed: bool) -> Self {
+        Self { items: Self::items_for(installed), cursor: 0 }
+    }
+
+    pub fn items_for(installed: bool) -> Vec<MenuItem> {
+        let mut v = vec![MenuItem::RunOnce];
+        if installed {
+            v.push(MenuItem::ShowStatus);
+            v.push(MenuItem::UninstallService);
+        } else {
+            v.push(MenuItem::InstallService);
+        }
+        v.push(MenuItem::ToggleLang);
+        v.push(MenuItem::Quit);
+        v
+    }
+
+    pub fn up(&mut self) {
+        let n = self.items.len();
+        self.cursor = (self.cursor + n - 1) % n;
+    }
+    pub fn down(&mut self) {
+        self.cursor = (self.cursor + 1) % self.items.len();
+    }
+    pub fn selected(&self) -> MenuItem {
+        self.items[self.cursor]
+    }
+}
+
+/// The elevate-vs-run-here fork. Every "install/uninstall/run" needs
+/// Administrator; "show status" and "quit" do not.
+pub fn dispatch_choice(choice: LauncherChoice, elevated: bool) -> ResolvedAction {
+    use LauncherChoice as C;
+    use ResolvedAction as R;
+    match (choice, elevated) {
+        (C::RunOnce, true) => R::RunEngineHere,
+        (C::RunOnce, false) => R::ElevateAndRun,
+        (C::InstallService, true) => R::InstallHere,
+        (C::InstallService, false) => R::ElevateAndInstall,
+        (C::ShowStatus, _) => R::StatusHere,
+        (C::UninstallService, true) => R::UninstallHere,
+        (C::UninstallService, false) => R::ElevateAndUninstall,
+        (C::Quit, _) => R::Exit,
+    }
+}
+
+fn lang_code(l: i18n::Lang) -> &'static str {
+    match l {
         i18n::Lang::En => "en",
         i18n::Lang::Tr => "tr",
-    };
+    }
+}
+
+/// Elevated re-spawn argv for "install as a service".
+pub fn elevated_install_args(lang: i18n::Lang) -> Vec<OsString> {
     vec![
         "service".into(),
         "install".into(),
         "--lang".into(),
-        code.into(),
+        lang_code(lang).into(),
         FROM_LAUNCHER_FLAG.into(),
     ]
 }
 
+/// Elevated re-spawn argv for "uninstall the service".
+pub fn elevated_uninstall_args(lang: i18n::Lang) -> Vec<OsString> {
+    vec![
+        "service".into(),
+        "uninstall".into(),
+        "--lang".into(),
+        lang_code(lang).into(),
+        FROM_LAUNCHER_FLAG.into(),
+    ]
+}
+
+/// Elevated re-spawn argv for "run once" — straight into `--engine`, no
+/// launcher marker (the engine path never shows a TUI).
+pub fn elevated_run_args(lang: i18n::Lang) -> Vec<OsString> {
+    vec!["--engine".into(), "--lang".into(), lang_code(lang).into()]
+}
+
+// --------------------------------------------------------------------------- //
+//  Entry point
+// --------------------------------------------------------------------------- //
+
 pub fn run() -> anyhow::Result<()> {
-    let action = decide(is_double_click(), is_elevated(), crate::service::is_installed());
-    if action != Action::ShowUsage {
-        // Explorer gave us a console window that flashed on screen; the UI from
-        // here on is MessageBox only. Drop it.
-        // SAFETY: no arguments; failure (no console attached) is fine to ignore.
-        unsafe {
-            let _ = FreeConsole();
-        }
-    }
-    match action {
-        Action::ShowUsage => {
+    match decide(is_double_click()) {
+        Screen::Usage => {
             crate::usage();
             std::process::exit(2);
         }
-        Action::AlreadyInstalled => {
-            info_box(&i18n::launcher_already_installed());
-            Ok(())
-        }
-        Action::InstallHere => {
-            let opts = crate::service::install::Opts {
-                lang: i18n::get(),
-                enable_overlap: false,
-                profile_dir: None,
-                install_dir: None,
-                start_demand: false,
-                force: false,
-            };
-            let res = crate::service::install::install(&opts);
+        Screen::Tui => {}
+    }
+
+    let installed = crate::service::is_installed();
+    let elevated = is_elevated();
+
+    // NB: unlike 4b we do NOT FreeConsole() — the TUI lives in this console.
+    match dispatch_choice(tui_menu(installed), elevated) {
+        ResolvedAction::Exit => Ok(()),
+
+        ResolvedAction::RunEngineHere => crate::engine_cmd::run_engine(None, None, false),
+        ResolvedAction::ElevateAndRun => elevate(elevated_run_args(i18n::get()), false),
+
+        ResolvedAction::InstallHere => {
+            let res = crate::service::install::install(&install_opts());
             show_install_result(&res);
             res
         }
-        Action::ElevateAndInstall => elevate_and_reinvoke(i18n::get()),
+        ResolvedAction::ElevateAndInstall => elevate(elevated_install_args(i18n::get()), true),
+
+        ResolvedAction::StatusHere => {
+            let _ = crate::service::status::run();
+            pause();
+            Ok(())
+        }
+
+        ResolvedAction::UninstallHere => {
+            let res = crate::service::uninstall::run(&["service".into(), "uninstall".into()]);
+            match &res {
+                Ok(()) => info_box(&i18n::launcher_uninstall_ok()),
+                Err(e) => error_box(&i18n::launcher_uninstall_failed(&e.to_string())),
+            }
+            res
+        }
+        ResolvedAction::ElevateAndUninstall => elevate(elevated_uninstall_args(i18n::get()), true),
     }
 }
 
-/// MessageBox the outcome of an install. Called here (already-elevated path)
-/// and by the elevated `service install --from-launcher` re-spawn.
+fn install_opts() -> crate::service::install::Opts {
+    crate::service::install::Opts {
+        lang: i18n::get(),
+        enable_overlap: false,
+        profile_dir: None,
+        install_dir: None,
+        start_demand: false,
+        force: false,
+    }
+}
+
+/// MessageBox the outcome of an install. Also called by the elevated
+/// `service install --from-launcher` re-spawn.
 pub fn show_install_result(res: &anyhow::Result<()>) {
     match res {
         Ok(()) => info_box(&i18n::launcher_install_ok()),
@@ -116,17 +255,30 @@ pub fn show_install_result(res: &anyhow::Result<()>) {
     }
 }
 
-fn elevate_and_reinvoke(lang: i18n::Lang) -> anyhow::Result<()> {
+/// MessageBox the outcome of an uninstall. Called by the elevated
+/// `service uninstall --from-launcher` re-spawn.
+pub fn show_uninstall_result(res: &anyhow::Result<()>) {
+    match res {
+        Ok(()) => info_box(&i18n::launcher_uninstall_ok()),
+        Err(e) => error_box(&i18n::launcher_uninstall_failed(&e.to_string())),
+    }
+}
+
+/// `ShellExecuteW "runas"` self re-spawn. `hidden` = the re-spawn shows its own
+/// MessageBox (service install/uninstall); otherwise it gets a visible window
+/// (the engine's live log).
+fn elevate(args: Vec<OsString>, hidden: bool) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let params = elevated_install_args(lang)
+    let params = args
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(" ");
     let exe_w = wide(&exe.to_string_lossy());
     let params_w = wide(&params);
-    // SAFETY: both strings are NUL-terminated and outlive the call; a null
-    // owner HWND and null working directory are documented as valid.
+    let show = if hidden { SW_HIDE } else { SW_SHOWNORMAL };
+    // SAFETY: both wide strings are NUL-terminated and outlive the call; a null
+    // owner HWND / working directory are documented as valid.
     let h = unsafe {
         ShellExecuteW(
             HWND::default(),
@@ -134,24 +286,269 @@ fn elevate_and_reinvoke(lang: i18n::Lang) -> anyhow::Result<()> {
             PCWSTR(exe_w.as_ptr()),
             PCWSTR(params_w.as_ptr()),
             PCWSTR::null(),
-            SW_HIDE,
+            show,
         )
     };
-    // ShellExecuteW returns a fake HINSTANCE; > 32 means it launched. A smaller
-    // value is an error — most often 1223 (ERROR_CANCELLED: user declined UAC).
+    // > 32 means it launched; a smaller value is an error, most often 1223
+    // (ERROR_CANCELLED — the user declined the UAC prompt).
     if h.0 as isize > 32 {
-        Ok(()) // the elevated instance now owns the flow and shows its own box
-    } else {
+        if !hidden {
+            println!("{}", i18n::t(Msg::TuiElevatedStarted));
+        }
+        Ok(())
+    } else if hidden {
         warn_box(&i18n::launcher_elevate_cancelled());
+        Ok(())
+    } else {
+        println!("{}", i18n::launcher_elevate_cancelled());
+        pause();
         Ok(())
     }
 }
 
-// --- Win32 probes (thin wrappers; the routing they feed is what's tested) ---
+fn toggle_lang() {
+    i18n::set(match i18n::get() {
+        i18n::Lang::En => i18n::Lang::Tr,
+        i18n::Lang::Tr => i18n::Lang::En,
+    });
+}
+
+fn pause() {
+    println!("\n{}", i18n::t(Msg::TuiPressKey));
+    let mut s = String::new();
+    let _ = std::io::stdin().read_line(&mut s);
+}
+
+// --------------------------------------------------------------------------- //
+//  The TUI itself (not unit-tested — terminal I/O, like the MessageBox helpers)
+// --------------------------------------------------------------------------- //
+
+/// Runs the arrow-key menu and returns the user's choice (`Quit` on Esc/Q).
+/// Falls back to a plain numbered prompt when the console has no
+/// virtual-terminal support.
+fn tui_menu(installed: bool) -> LauncherChoice {
+    let guard = match TermGuard::enter() {
+        Ok(g) => g,
+        Err(_) => return plain_menu(installed),
+    };
+    let mut model = MenuModel::new(installed);
+    loop {
+        guard.paint(&frame(&model, i18n::get(), installed));
+        match read_key() {
+            Key::Up => model.up(),
+            Key::Down => model.down(),
+            Key::Char('l') | Key::Char('L') => toggle_lang(),
+            Key::Esc | Key::Char('q') | Key::Char('Q') => return LauncherChoice::Quit,
+            Key::Enter => match model.selected() {
+                MenuItem::ToggleLang => toggle_lang(),
+                MenuItem::Quit => return LauncherChoice::Quit,
+                MenuItem::RunOnce => return LauncherChoice::RunOnce,
+                MenuItem::InstallService => return LauncherChoice::InstallService,
+                MenuItem::ShowStatus => return LauncherChoice::ShowStatus,
+                MenuItem::UninstallService => return LauncherChoice::UninstallService,
+            },
+            Key::Char(_) | Key::Other => {}
+        }
+    }
+}
+
+fn item_label(item: MenuItem, lang: i18n::Lang) -> String {
+    match item {
+        MenuItem::RunOnce => i18n::t(Msg::MenuRunOnce).to_string(),
+        MenuItem::InstallService => i18n::t(Msg::MenuInstall).to_string(),
+        MenuItem::ShowStatus => i18n::t(Msg::MenuStatus).to_string(),
+        MenuItem::UninstallService => i18n::t(Msg::MenuUninstall).to_string(),
+        MenuItem::ToggleLang => format!(
+            "{}: {}",
+            i18n::t(Msg::MenuLanguage),
+            lang_code(lang).to_uppercase()
+        ),
+        MenuItem::Quit => i18n::t(Msg::MenuQuit).to_string(),
+    }
+}
+
+/// One full-screen frame. `i18n::t` is read fresh here, so a language toggle
+/// shows on the very next paint with no extra plumbing.
+fn frame(model: &MenuModel, lang: i18n::Lang, installed: bool) -> String {
+    let mut s = String::from("\x1b[2J\x1b[H");
+    s.push_str("\r\n  \x1b[1;36m+-----------------------------------+\x1b[0m\r\n");
+    s.push_str("  \x1b[1;36m|\x1b[0m   \x1b[1mBOSPHORUS\x1b[0m  \x1b[2mDPI bypass\x1b[0m              \x1b[1;36m|\x1b[0m\r\n");
+    s.push_str("  \x1b[1;36m+-----------------------------------+\x1b[0m\r\n\r\n");
+
+    let svc = if installed {
+        i18n::t(Msg::TuiSvcInstalled)
+    } else {
+        i18n::t(Msg::TuiSvcNotInstalled)
+    };
+    s.push_str(&format!("  \x1b[2m{svc}\x1b[0m\r\n\r\n"));
+
+    for (i, item) in model.items.iter().enumerate() {
+        let label = item_label(*item, lang);
+        if i == model.cursor {
+            s.push_str(&format!("  \x1b[7m  {label}  \x1b[0m\r\n"));
+        } else {
+            s.push_str(&format!("    {label}\r\n"));
+        }
+    }
+    s.push_str(&format!("\r\n  \x1b[2m{}\x1b[0m\r\n", i18n::t(Msg::TuiHelp)));
+    s
+}
+
+/// VT-unavailable fallback: a numbered prompt. Rarely reached (VT processing
+/// has shipped in the Windows console since 2015).
+fn plain_menu(installed: bool) -> LauncherChoice {
+    let model = MenuModel::new(installed);
+    println!("\nBosphorus\n");
+    for (i, item) in model.items.iter().enumerate() {
+        println!("  {}) {}", i + 1, item_label(*item, i18n::get()));
+    }
+    print!("\n> ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return LauncherChoice::Quit;
+    }
+    let idx = match line.trim().parse::<usize>() {
+        Ok(n) if (1..=model.items.len()).contains(&n) => n - 1,
+        _ => return LauncherChoice::Quit,
+    };
+    match model.items[idx] {
+        MenuItem::RunOnce => LauncherChoice::RunOnce,
+        MenuItem::InstallService => LauncherChoice::InstallService,
+        MenuItem::ShowStatus => LauncherChoice::ShowStatus,
+        MenuItem::UninstallService => LauncherChoice::UninstallService,
+        MenuItem::ToggleLang => {
+            toggle_lang();
+            plain_menu(installed)
+        }
+        MenuItem::Quit => LauncherChoice::Quit,
+    }
+}
+
+// --- console raw-mode guard --------------------------------------------------
+
+/// Owns the console-mode / output-code-page overrides for the duration of the
+/// menu and restores them on `Drop` — including on an unwinding panic
+/// (`panic = "unwind"` is load-bearing in the workspace release profile).
+struct TermGuard {
+    out: HANDLE,
+    inp: HANDLE,
+    out_mode: CONSOLE_MODE,
+    in_mode: CONSOLE_MODE,
+    out_cp: u32,
+}
+
+impl TermGuard {
+    fn enter() -> anyhow::Result<Self> {
+        // SAFETY: standard GetStdHandle / Get-Set-ConsoleMode calls; every
+        // handle is a pseudo-handle we do not close, and the out-params are
+        // correctly sized.
+        unsafe {
+            let out = GetStdHandle(STD_OUTPUT_HANDLE)?;
+            let inp = GetStdHandle(STD_INPUT_HANDLE)?;
+            let mut out_mode = CONSOLE_MODE::default();
+            let mut in_mode = CONSOLE_MODE::default();
+            if !GetConsoleMode(out, &mut out_mode).as_bool()
+                || !GetConsoleMode(inp, &mut in_mode).as_bool()
+            {
+                anyhow::bail!("no console mode (not a real console?)");
+            }
+            let out_cp = GetConsoleOutputCP();
+
+            let vt = CONSOLE_MODE(
+                out_mode.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0 | ENABLE_PROCESSED_OUTPUT.0,
+            );
+            if !SetConsoleMode(out, vt).as_bool() {
+                anyhow::bail!("virtual-terminal output unsupported");
+            }
+            let raw_in = CONSOLE_MODE(
+                in_mode.0
+                    & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0 | ENABLE_PROCESSED_INPUT.0),
+            );
+            let _ = SetConsoleMode(inp, raw_in);
+            let _ = SetConsoleOutputCP(65001); // UTF-8: arrows + Turkish glyphs
+
+            print!("\x1b[?1049h\x1b[?25l"); // alt screen, hide cursor
+            let _ = std::io::stdout().flush();
+            Ok(Self { out, inp, out_mode, in_mode, out_cp })
+        }
+    }
+
+    fn paint(&self, frame: &str) {
+        print!("{frame}");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        print!("\x1b[?25h\x1b[?1049l"); // show cursor, leave alt screen
+        let _ = std::io::stdout().flush();
+        // SAFETY: restoring the exact modes/CP we captured in `enter`.
+        unsafe {
+            let _ = SetConsoleMode(self.out, self.out_mode);
+            let _ = SetConsoleMode(self.inp, self.in_mode);
+            let _ = SetConsoleOutputCP(self.out_cp);
+        }
+    }
+}
+
+// --- key input ------------------------------------------------------------
+
+enum Key {
+    Up,
+    Down,
+    Enter,
+    Esc,
+    Char(char),
+    Other,
+}
+
+fn read_key() -> Key {
+    let mut buf = [INPUT_RECORD::default(); 1];
+    loop {
+        // SAFETY: `buf` is a valid 1-element slice; `n` is a valid out-param.
+        let inp = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+            Ok(h) => h,
+            Err(_) => return Key::Esc,
+        };
+        let mut n = 0u32;
+        if !unsafe { ReadConsoleInputW(inp, &mut buf, &mut n) }.as_bool() || n == 0 {
+            return Key::Esc; // read failure — treat as quit
+        }
+        let rec = buf[0];
+        if u32::from(rec.EventType) != KEY_EVENT {
+            continue;
+        }
+        // SAFETY: EventType == KEY_EVENT, so the KeyEvent arm of the union is live.
+        let ke = unsafe { rec.Event.KeyEvent };
+        if !ke.bKeyDown.as_bool() {
+            continue;
+        }
+        return match ke.wVirtualKeyCode {
+            0x26 => Key::Up,
+            0x28 => Key::Down,
+            0x0D => Key::Enter,
+            0x1B => Key::Esc,
+            _ => {
+                // SAFETY: UnicodeChar arm of the uChar union.
+                let ch = unsafe { ke.uChar.UnicodeChar };
+                match char::from_u32(u32::from(ch)) {
+                    Some(c) if !c.is_control() => Key::Char(c),
+                    _ => Key::Other,
+                }
+            }
+        };
+    }
+}
+
+// --------------------------------------------------------------------------- //
+//  Win32 probes (thin wrappers; the routing they feed is what's tested)
+// --------------------------------------------------------------------------- //
 
 /// True when this process is the only one attached to its console — i.e. the
-/// console was created because Explorer launched the exe. A count `> 1` means
-/// we were started from an existing shell (leave stdout/usage behaviour alone).
+/// console was created because Explorer launched the exe. `> 1` means we were
+/// started from an existing shell.
 fn is_double_click() -> bool {
     let mut list = [0u32; 4];
     // SAFETY: `list` is a valid, writable buffer of `list.len()` u32s.
@@ -210,29 +607,84 @@ mod tests {
     use super::*;
     use crate::i18n::Lang;
 
+    fn as_strs(v: &[OsString]) -> Vec<String> {
+        v.iter().map(|o| o.to_string_lossy().into_owned()).collect()
+    }
+
     #[test]
     fn from_a_shell_no_args_always_shows_usage() {
-        assert_eq!(decide(false, false, false), Action::ShowUsage);
-        assert_eq!(decide(false, true, true), Action::ShowUsage);
+        assert_eq!(decide(false), Screen::Usage);
+        assert_eq!(decide(true), Screen::Tui);
     }
 
     #[test]
-    fn double_click_routing_matrix() {
-        // not installed
-        assert_eq!(decide(true, false, false), Action::ElevateAndInstall);
-        assert_eq!(decide(true, true, false), Action::InstallHere);
-        // already installed -> informational only, regardless of elevation
-        assert_eq!(decide(true, false, true), Action::AlreadyInstalled);
-        assert_eq!(decide(true, true, true), Action::AlreadyInstalled);
+    fn menu_items_depend_on_installed_state() {
+        assert_eq!(
+            MenuModel::items_for(false),
+            [
+                MenuItem::RunOnce,
+                MenuItem::InstallService,
+                MenuItem::ToggleLang,
+                MenuItem::Quit
+            ]
+        );
+        assert_eq!(
+            MenuModel::items_for(true),
+            [
+                MenuItem::RunOnce,
+                MenuItem::ShowStatus,
+                MenuItem::UninstallService,
+                MenuItem::ToggleLang,
+                MenuItem::Quit
+            ]
+        );
     }
 
     #[test]
-    fn elevated_reinvoke_argv_is_service_install_from_launcher() {
-        let en: Vec<String> = elevated_install_args(Lang::En)
-            .iter()
-            .map(|o| o.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(en, ["service", "install", "--lang", "en", "--from-launcher"]);
-        assert_eq!(elevated_install_args(Lang::Tr)[3], "tr");
+    fn menu_cursor_wraps_both_ways() {
+        let mut m = MenuModel::new(false); // 4 items
+        assert_eq!(m.cursor, 0);
+        m.up();
+        assert_eq!(m.cursor, 3);
+        assert_eq!(m.selected(), MenuItem::Quit);
+        m.down();
+        assert_eq!(m.cursor, 0);
+        m.down();
+        m.down();
+        assert_eq!(m.selected(), MenuItem::ToggleLang);
+    }
+
+    #[test]
+    fn dispatch_choice_matrix_covers_the_4b_routing_plus_two_way_elevation() {
+        use LauncherChoice as C;
+        use ResolvedAction as R;
+        // 4b: install decision, now at the (choice, elevated) seam
+        assert_eq!(dispatch_choice(C::InstallService, false), R::ElevateAndInstall);
+        assert_eq!(dispatch_choice(C::InstallService, true), R::InstallHere);
+        // new: "run once" self-elevates the same way
+        assert_eq!(dispatch_choice(C::RunOnce, false), R::ElevateAndRun);
+        assert_eq!(dispatch_choice(C::RunOnce, true), R::RunEngineHere);
+        // new: uninstall
+        assert_eq!(dispatch_choice(C::UninstallService, false), R::ElevateAndUninstall);
+        assert_eq!(dispatch_choice(C::UninstallService, true), R::UninstallHere);
+        // status needs no elevation; quit is quit
+        assert_eq!(dispatch_choice(C::ShowStatus, false), R::StatusHere);
+        assert_eq!(dispatch_choice(C::ShowStatus, true), R::StatusHere);
+        assert_eq!(dispatch_choice(C::Quit, false), R::Exit);
+        assert_eq!(dispatch_choice(C::Quit, true), R::Exit);
+    }
+
+    #[test]
+    fn elevated_reinvoke_argv_per_action() {
+        assert_eq!(
+            as_strs(&elevated_install_args(Lang::En)),
+            ["service", "install", "--lang", "en", "--from-launcher"]
+        );
+        assert_eq!(
+            as_strs(&elevated_uninstall_args(Lang::Tr)),
+            ["service", "uninstall", "--lang", "tr", "--from-launcher"]
+        );
+        assert_eq!(as_strs(&elevated_run_args(Lang::En)), ["--engine", "--lang", "en"]);
+        assert_eq!(elevated_run_args(Lang::Tr)[2], "tr");
     }
 }
