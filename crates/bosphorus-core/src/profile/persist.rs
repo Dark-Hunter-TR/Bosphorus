@@ -16,10 +16,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::profile::NetPhase;
+use crate::profile::{NetPhase, StrategyQuality};
 use crate::strategy::{Strategy, StrategyId};
 
 /// On-disk format version. Bump on an incompatible schema change.
+///
+/// Still `1` after adding [`PersistedScore::quality`]: the new field is
+/// `#[serde(default)]`, so a v1 file written before this change loads fine and
+/// the quality counters simply start from zero.
 pub const PROFILE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +31,10 @@ pub struct PersistedScore {
     pub strategy: Strategy,
     pub trials: u32,
     pub successes: u32,
+    /// Latency / retransmit quality. Absent in profiles written before it
+    /// existed — defaults to empty.
+    #[serde(default)]
+    pub quality: StrategyQuality,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +119,7 @@ mod tests {
                     strategy: Strategy::m4_fixed(),
                     trials: 3,
                     successes: 0,
+                    quality: StrategyQuality::default(),
                 }],
                 active: None,
                 consecutive_success: 0,

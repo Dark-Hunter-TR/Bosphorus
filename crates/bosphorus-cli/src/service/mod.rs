@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-mod install;
+pub(crate) mod install;
 mod runner;
 mod status;
 mod uninstall;
@@ -24,6 +24,18 @@ pub fn profiles_dir() -> PathBuf {
 }
 pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
+}
+
+/// True if the `Bosphorus` service is registered with the SCM. No elevation
+/// needed — a plain `CONNECT` + `QUERY_STATUS` open, same as `service status`.
+/// Used by the double-click launcher to decide install vs. "already there".
+pub fn is_installed() -> bool {
+    use std::ffi::OsStr;
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT)
+        .and_then(|m| m.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS))
+        .is_ok()
 }
 
 /// `args` is `std::env::args().skip(1)` — so `args[0] == "service"`.
@@ -51,4 +63,23 @@ pub(crate) fn map_scm_err(e: windows_service::Error) -> anyhow::Error {
         }
     }
     anyhow::anyhow!("SCM: {e}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_dirs_are_nested_under_bosphorus() {
+        let d = data_dir();
+        assert!(d.ends_with("Bosphorus"), "data_dir = {d:?}");
+        assert_eq!(profiles_dir(), d.join("profiles"));
+        assert_eq!(logs_dir(), d.join("logs"));
+    }
+
+    #[test]
+    fn dispatch_without_a_subcommand_prints_usage_and_returns_ok() {
+        // `args[0] == "service"`, nothing after it -> usage, no SCM call, Ok.
+        assert!(dispatch(&["service".to_string()]).is_ok());
+    }
 }

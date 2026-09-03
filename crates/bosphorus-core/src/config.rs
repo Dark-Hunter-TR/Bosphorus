@@ -15,6 +15,13 @@ pub struct ProfilePaths {
     pub net_key: String,
 }
 
+/// TCP ports treated as TLS. A ClientHello to any of these is a discovery /
+/// strategy candidate, and the capture filter's outbound (`DstPort`) and
+/// inbound (`SrcPort`) clauses cover them all. 443 plus the Cloudflare
+/// HTTPS-alternate ports Discord's voice signalling (`*.discord.media`) rides
+/// on — without these that traffic is invisible to the whole bypass path.
+pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 2083, 2087, 2096];
+
 /// User-facing configuration. Every field has a safe automatic default; the CLI
 /// only fills in explicit overrides.
 #[derive(Clone, Debug)]
@@ -23,6 +30,11 @@ pub struct EvasionConfig {
     /// packets with a TCP payload smaller than this (or that look like a
     /// request / TLS handshake) are captured. GoodbyeDPI preset value: 1200.
     pub max_payload_filter: u16,
+
+    /// TCP ports the capture filter and the outbound-ClientHello gate treat as
+    /// TLS. Defaults to [`DEFAULT_TLS_PORTS`]. An empty list is treated as
+    /// `[443]` by the filter builder.
+    pub tls_ports: Vec<u16>,
 
     /// When `Some`, `udp/53` is added to the capture filter and DNS is
     /// redirected to this address (M10). When `None`, DNS is never touched
@@ -66,6 +78,7 @@ impl Default for EvasionConfig {
     fn default() -> Self {
         Self {
             max_payload_filter: 1200,
+            tls_ports: DEFAULT_TLS_PORTS.to_vec(),
             dns_upstream: None,
             quic_drop: None,
             conntrack: ConntrackTuning::default(),
@@ -82,6 +95,21 @@ impl Default for EvasionConfig {
 }
 
 impl EvasionConfig {
+    /// Ports the outbound-ClientHello gate and the capture filter treat as TLS.
+    /// Falls back to `[443]` if [`tls_ports`](Self::tls_ports) was cleared.
+    pub fn effective_tls_ports(&self) -> &[u16] {
+        if self.tls_ports.is_empty() {
+            &[443]
+        } else {
+            &self.tls_ports
+        }
+    }
+
+    /// True if `port` is one this engine mutates ClientHellos on.
+    pub fn is_tls_port(&self, port: u16) -> bool {
+        self.effective_tls_ports().contains(&port)
+    }
+
     /// True if any override is set (discovery grid should be a single entry).
     pub fn has_strategy_override(&self) -> bool {
         self.desync_override.is_some()

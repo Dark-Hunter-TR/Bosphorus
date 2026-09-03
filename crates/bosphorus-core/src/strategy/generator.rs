@@ -331,6 +331,13 @@ impl DefaultGenerator {
             .iter()
             .find(|s| !tried.contains(&s.id()) && accept(s))
     }
+
+    /// Look up a grid strategy by its content id (for seed lists, which carry
+    /// ids learned on other targets). `None` if the id is not in this grid
+    /// (e.g. the grid was renumbered between builds).
+    pub fn get_by_id(&self, id: StrategyId) -> Option<&Strategy> {
+        self.strategies.iter().find(|s| s.id() == id)
+    }
 }
 
 #[cfg(test)]

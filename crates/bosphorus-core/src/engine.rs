@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 
 use crate::config::{EvasionConfig, ProfilePaths};
 use crate::conntrack::{self, FlowKey, FlowOutcome, FlowTable};
-use crate::discovery::{Discovery, DiscoveryEvent, TargetSummary};
+use crate::discovery::{Discovery, DiscoveryEvent, TargetSummary, VerdictTiming};
 use crate::error::CoreError;
 use crate::packet::{find_sni, looks_like_client_hello, PacketView};
 use crate::profile::{NetPhase, TrialKind, TrialRecord};
@@ -256,16 +256,31 @@ impl Engine {
             }
         });
         if let Some(outcome) = verdict {
-            let (name, trial, target) = self
+            let (name, trial, target, ch_at, retx) = self
                 .flows
-                .peek(&key, |st| (st.server_name.clone(), st.trial, st.target_key.clone()))
-                .unwrap_or((None, None, None));
+                .peek(&key, |st| {
+                    (
+                        st.server_name.clone(),
+                        st.trial,
+                        st.target_key.clone(),
+                        st.client_hello_at,
+                        st.client_hello_retx,
+                    )
+                })
+                .unwrap_or((None, None, None, None, 0));
+            let timing = VerdictTiming {
+                latency: ch_at.map(|t| now.saturating_duration_since(t)),
+                retx,
+            };
             log_outcome(&key, name.as_deref(), outcome, "packet");
-            self.feed_discovery(&session.discovery, target.as_deref(), trial, outcome);
+            self.feed_discovery(&session.discovery, target.as_deref(), trial, outcome, timing);
         }
 
         // --- strategy on outbound ClientHello ---
-        if meta.outbound && view.dst_port() == Some(443) && looks_like_client_hello(view.payload()) {
+        if meta.outbound
+            && view.dst_port().is_some_and(|p| self.cfg.is_tls_port(p))
+            && looks_like_client_hello(view.payload())
+        {
             return self.act_on_client_hello(&session.discovery, &key, &view, meta, out, now);
         }
 
@@ -398,6 +413,7 @@ impl Engine {
         target: Option<&str>,
         trial: Option<TrialRecord>,
         outcome: FlowOutcome,
+        timing: VerdictTiming,
     ) {
         if self.forced.is_some() {
             return;
@@ -405,7 +421,7 @@ impl Engine {
         let (Some(target), Some(trial)) = (target, trial) else {
             return;
         };
-        if let Some((ev, phase)) = discovery.record(target, trial.id, outcome) {
+        if let Some((ev, phase)) = discovery.record_timed(target, trial.id, outcome, timing) {
             log_discovery(target, &ev, phase);
         }
     }
@@ -467,7 +483,14 @@ impl Engine {
         }
         for rf in self.flows.resolve_timeouts(&self.cfg.conntrack, now) {
             log_outcome(&rf.key, rf.server_name.as_deref(), rf.outcome, "timeout");
-            self.feed_discovery(&session.discovery, rf.target_key.as_deref(), rf.trial, rf.outcome);
+            let timing = VerdictTiming { latency: rf.latency, retx: rf.retx };
+            self.feed_discovery(
+                &session.discovery,
+                rf.target_key.as_deref(),
+                rf.trial,
+                rf.outcome,
+                timing,
+            );
         }
 
         self.progress_digest(&session.discovery, now);
@@ -866,6 +889,15 @@ mod tests {
         p
     }
 
+    /// `ch_with_sni` but to an arbitrary destination port (bytes 22..24 of the
+    /// IPv4/TCP fixture). Checksums are unverified by `PacketView` / the test
+    /// sink, so no recompute is needed.
+    fn ch_with_sni_dport(host: &str, sport: u16, dport: u16) -> Vec<u8> {
+        let mut p = ch_with_sni(host, sport);
+        p[22..24].copy_from_slice(&dport.to_be_bytes());
+        p
+    }
+
     /// Inbound TCP packet 93.184.216.34:443 -> 10.0.0.5:<sport> with `flags`.
     fn inbound_tcp(sport: u16, flags: u8, payload: &[u8]) -> Vec<u8> {
         inbound_tcp_ttl(sport, 64, flags, payload)
@@ -1130,6 +1162,23 @@ mod tests {
     }
 
     #[test]
+    fn strategy_applies_on_a_cloudflare_https_alt_port_but_not_a_plain_one() {
+        let engine = Engine::new_with_strategy(EvasionConfig::default(), Strategy::m4_fixed());
+
+        // *.discord.media voice signalling rides Cloudflare's 2096 - must be mutated.
+        let mut ch = ch_with_sni_dport("c-fra07.discord.media", 48001, 2096);
+        let mut out = SendBatch::new();
+        assert_eq!(engine.process(&mut ch, &mut out_meta(), &mut out), Decision::ForwardBatchOnly);
+        assert!(!out.is_empty(), "strategy not applied on port 2096");
+
+        // A non-TLS port is left alone.
+        let mut other = ch_with_sni_dport("example.com", 48002, 8080);
+        let mut o2 = SendBatch::new();
+        assert_eq!(engine.process(&mut other, &mut out_meta(), &mut o2), Decision::ForwardOriginal);
+        assert!(o2.is_empty());
+    }
+
+    #[test]
     fn clienthello_retransmit_after_strategy_passes_through() {
         let engine = Engine::new_with_strategy(EvasionConfig::default(), Strategy::m4_fixed());
 
@@ -1345,6 +1394,73 @@ mod tests {
         assert!(
             crate::profile::persist::profile_path(dir.path(), "keyA").exists(),
             "keyA's file was flushed on the way into nonet"
+        );
+    }
+
+    /// A-guarantee: switching networks NEVER destroys another network's saved
+    /// profile. Drive keyA -> keyB -> keyA -> keyB, blocking a distinct target
+    /// on each of keyA and keyB, and assert that after the round trips both
+    /// files still exist, each parses, and each holds ONLY its own network's
+    /// target. `rebind` only ever writes a network's file (atomic temp+rename)
+    /// on the way out and reads it on the way in — there is no delete path.
+    #[test]
+    fn round_trip_between_two_networks_never_loses_either_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, cell) = live_engine(dir.path(), "keyA");
+        let t0 = Instant::now();
+
+        // keyA: block a.example -> Discover.
+        engine.process(&mut ch_with_sni("a.example", 60001), &mut out_meta(), &mut SendBatch::new());
+        engine.process(&mut inbound_rst(60001), &mut in_meta(), &mut SendBatch::new());
+        assert_eq!(engine.discovery_summary()[0].phase, NetPhase::Discover);
+
+        // A -> B (flushes keyA/a.example to its own file).
+        *cell.lock() = "keyB".into();
+        engine.mark_netkey_dirty();
+        engine.tick(t0 + Duration::from_secs(8));
+        assert_eq!(engine.current_profile().unwrap().net_key, "keyB");
+
+        // keyB: block b.example -> Discover.
+        engine.process(&mut ch_with_sni("b.example", 60002), &mut out_meta(), &mut SendBatch::new());
+        engine.process(&mut inbound_rst(60002), &mut in_meta(), &mut SendBatch::new());
+        assert_eq!(engine.discovery_summary()[0].phase, NetPhase::Discover);
+
+        // B -> A (flushes keyB/b.example; reloads keyA -> a.example from disk).
+        *cell.lock() = "keyA".into();
+        engine.mark_netkey_dirty();
+        engine.tick(t0 + Duration::from_secs(40)); // 40 - 8 = 32s >= min_rebind_interval
+        assert_eq!(engine.current_profile().unwrap().net_key, "keyA");
+        let a = engine
+            .discovery_summary()
+            .into_iter()
+            .find(|t| t.key == "a.example")
+            .expect("keyA's target survived the round trip and reloaded");
+        assert!(a.from_disk);
+        assert_eq!(a.phase, NetPhase::Discover);
+
+        // A -> B again (flushes keyA/a.example again; reloads keyB -> b.example).
+        *cell.lock() = "keyB".into();
+        engine.mark_netkey_dirty();
+        engine.tick(t0 + Duration::from_secs(72));
+        let b = engine
+            .discovery_summary()
+            .into_iter()
+            .find(|t| t.key == "b.example")
+            .expect("keyB's target survived the round trip and reloaded");
+        assert!(b.from_disk);
+
+        // Both files intact on disk, each with only its own target.
+        let fa = crate::profile::persist::load(dir.path(), "keyA").expect("keyA file parses");
+        assert!(fa.targets.iter().any(|t| t.key == "a.example"));
+        assert!(
+            !fa.targets.iter().any(|t| t.key == "b.example"),
+            "keyA's file must never contain keyB's target"
+        );
+        let fb = crate::profile::persist::load(dir.path(), "keyB").expect("keyB file parses");
+        assert!(fb.targets.iter().any(|t| t.key == "b.example"));
+        assert!(
+            !fb.targets.iter().any(|t| t.key == "a.example"),
+            "keyB's file must never contain keyA's target"
         );
     }
 

@@ -6,7 +6,9 @@ mod scheduler;
 mod verdict;
 
 pub use scheduler::{Assignment, DiscoveryEvent, Scheduler};
-pub use verdict::{is_failure, is_success, score_delta};
+pub use verdict::{is_failure, is_success, score_delta, VerdictTiming};
+
+pub use crate::profile::SeedTier;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -16,7 +18,7 @@ use parking_lot::Mutex;
 use crate::config::EvasionConfig;
 use crate::conntrack::FlowOutcome;
 use crate::profile::persist::{PersistedScore, PersistedTarget, ProfileFile};
-use crate::profile::{NetPhase, ScoredStrategy, TargetState};
+use crate::profile::{NetPhase, ScoredStrategy, StrategyQuality, TargetState};
 use crate::strategy::{DefaultGenerator, StrategyId};
 
 pub struct Discovery {
@@ -120,6 +122,7 @@ impl Discovery {
                             trials: sc.trials,
                             successes: sc.successes,
                             last_success: None,
+                            quality: sc.quality.clone(),
                         },
                     );
                 }
@@ -133,12 +136,19 @@ impl Discovery {
     }
 
     /// Snapshot the current target map into a persistable [`ProfileFile`].
+    ///
+    /// Only targets that are expensive to re-derive are written — see
+    /// [`persist_worthy`]. `Probe` and not-blocked passthrough targets are
+    /// skipped: they carry no learned strategy and are re-established for free
+    /// on the next connection, so persisting them would only bloat the profile
+    /// file (and the reloaded target map) with hosts that need no bypass.
     pub fn export(&self, net_key: &str) -> ProfileFile {
         let sig = self.grid_signature();
         let targets = self
             .targets
             .lock()
             .values()
+            .filter(|ts| persist_worthy(ts))
             .map(|ts| PersistedTarget {
                 key: ts.key.clone(),
                 phase: ts.phase,
@@ -150,6 +160,7 @@ impl Discovery {
                         strategy: s.strategy.clone(),
                         trials: s.trials,
                         successes: s.successes,
+                        quality: s.quality.clone(),
                     })
                     .collect(),
                 active: ts.active,
@@ -165,16 +176,36 @@ impl Discovery {
     /// Pick the next trial for `target` (creating its state on first contact).
     /// `server_initial_ttl` (from the SYN-ACK, 64/128/255) gates overlap-family
     /// candidates; recorded once per target.
+    ///
+    /// A fresh `Discover` target is seeded from what already works on this
+    /// network: the promoted strategy of an `Active` sibling under the same
+    /// registered domain first, then the session's most common `active`
+    /// strategy. Seeds are tried before the grid sweep; a bad one costs a single
+    /// trial. With no `Active` targets to learn from the seed list is empty and
+    /// behaviour is identical to a plain grid sweep.
     pub fn assign(&self, target: &str, server_initial_ttl: Option<u8>) -> Assignment {
         let now = Instant::now();
         let mut map = self.targets.lock();
+
+        let priority = build_seeds(&map, target);
+
         let ts = map
             .entry(target.to_owned())
             .or_insert_with(|| TargetState::new(target.to_owned(), now));
         if ts.server_initial_ttl.is_none() {
             ts.server_initial_ttl = server_initial_ttl;
         }
-        let a = self.scheduler.assign(ts, &self.generator, now);
+        let a = self
+            .scheduler
+            .assign_seeded(ts, &self.generator, &priority, now);
+        if let Some(tier) = a.seed_tier {
+            tracing::debug!(
+                target: "bosphorus::discovery",
+                server = %target, ?tier,
+                strategy = a.strategy.as_ref().map(|s| s.describe()),
+                "seeded candidate offered (out of grid order)"
+            );
+        }
         match &a.event {
             Some(DiscoveryEvent::Exhausted { tried }) => tracing::warn!(
                 target: "bosphorus::discovery",
@@ -191,17 +222,33 @@ impl Discovery {
         a
     }
 
-    /// Feed back a flow's verdict. Returns the event + the target's new phase.
+    /// Feed back a flow's verdict with no timing info. Returns the event + the
+    /// target's new phase. See [`record_timed`](Self::record_timed).
     pub fn record(
         &self,
         target: &str,
         id: Option<StrategyId>,
         outcome: FlowOutcome,
     ) -> Option<(DiscoveryEvent, NetPhase)> {
+        self.record_timed(target, id, outcome, VerdictTiming::NONE)
+    }
+
+    /// Feed back a flow's verdict plus its [`VerdictTiming`]. The timing is
+    /// folded into the candidate's [`StrategyQuality`](crate::profile::StrategyQuality);
+    /// it is recorded only — promotion is unchanged.
+    pub fn record_timed(
+        &self,
+        target: &str,
+        id: Option<StrategyId>,
+        outcome: FlowOutcome,
+        timing: VerdictTiming,
+    ) -> Option<(DiscoveryEvent, NetPhase)> {
         let now = Instant::now();
         let mut map = self.targets.lock();
         let ts = map.get_mut(target)?;
-        let ev = self.scheduler.record(ts, &self.generator, id, outcome, now);
+        let ev = self
+            .scheduler
+            .record_timed(ts, &self.generator, id, outcome, timing, now);
         Some((ev, ts.phase))
     }
 
@@ -271,6 +318,99 @@ fn last_activity(ts: &TargetState) -> Instant {
     ts.last_assigned_at.unwrap_or(ts.created_at).max(ts.updated_at)
 }
 
+/// Crude registered domain (eTLD+1) — no Public Suffix List. Keeps the last two
+/// labels, or three when the second-to-last is a common second-level under a
+/// two-letter ccTLD (`bbc.co.uk`). Good enough as a *seeding* signal (a wrong
+/// grouping costs one trial); never used for a hard target merge.
+fn registered_domain(host: &str) -> &str {
+    let host = host.trim_end_matches('.');
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 {
+        return host;
+    }
+    const SLD: &[&str] = &["co", "com", "net", "org", "gov", "edu", "ac"];
+    let last = labels[labels.len() - 1];
+    let penult = labels[labels.len() - 2];
+    let take = if last.len() == 2 && SLD.contains(&penult) { 3 } else { 2 };
+    let start = labels.len() - take;
+    let byte_off: usize = labels[..start].iter().map(|l| l.len() + 1).sum();
+    &host[byte_off..]
+}
+
+/// Order two seed candidates by `StrategyQuality`: retransmit-free-looking
+/// first, then lowest observed latency. Used to break ties in the seed list.
+fn better_seed(a: &StrategyQuality, b: &StrategyQuality) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    b.looks_fast().cmp(&a.looks_fast()).then_with(|| match (a.min_latency, b.min_latency) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    })
+}
+
+/// Build the seed list for a `Discover` target from what already works on this
+/// network. `map` is the whole session target map (locked by the caller);
+/// `target` is excluded. Layered, most-confident first:
+///
+/// 1. `DomainSibling` — the promoted strategy of every `Active` target sharing
+///    `target`'s registered domain, quality-ordered.
+/// 2. `HouseStrategy` — the up-to-3 most common `active` strategies across every
+///    `Active` target in the session.
+///
+/// Ids are deduped across layers (first tier wins). Empty when there is nothing
+/// `Active` to learn from.
+fn build_seeds(
+    map: &HashMap<String, TargetState>,
+    target: &str,
+) -> Vec<(StrategyId, SeedTier)> {
+    let reg = registered_domain(target);
+    let mut out: Vec<(StrategyId, SeedTier)> = Vec::new();
+    let mut seen: HashSet<StrategyId> = HashSet::new();
+
+    let quality_of = |ts: &TargetState, id: StrategyId| -> StrategyQuality {
+        ts.scores.get(&id).map(|s| s.quality.clone()).unwrap_or_default()
+    };
+
+    // --- 1. domain-sibling promoted strategies ---
+    let mut sib: Vec<(StrategyId, StrategyQuality)> = Vec::new();
+    for (k, ts) in map {
+        if k == target || ts.phase != NetPhase::Active {
+            continue;
+        }
+        let Some(id) = ts.active else { continue };
+        if registered_domain(k) == reg {
+            sib.push((id, quality_of(ts, id)));
+        }
+    }
+    sib.sort_by(|a, b| better_seed(&a.1, &b.1));
+    for (id, _) in sib {
+        if seen.insert(id) {
+            out.push((id, SeedTier::DomainSibling));
+        }
+    }
+
+    // --- 2. session "house strategy": most common `active` id ---
+    let mut freq: HashMap<StrategyId, (u32, StrategyQuality)> = HashMap::new();
+    for (k, ts) in map {
+        if k == target || ts.phase != NetPhase::Active {
+            continue;
+        }
+        let Some(id) = ts.active else { continue };
+        let e = freq.entry(id).or_insert_with(|| (0, quality_of(ts, id)));
+        e.0 += 1;
+    }
+    let mut house: Vec<(StrategyId, (u32, StrategyQuality))> = freq.into_iter().collect();
+    house.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| better_seed(&a.1 .1, &b.1 .1)));
+    for (id, _) in house.into_iter().take(3) {
+        if seen.insert(id) {
+            out.push((id, SeedTier::HouseStrategy));
+        }
+    }
+
+    out
+}
+
 /// Lower = less worth keeping under the hard cap.
 fn value_rank(ts: &TargetState) -> u8 {
     match ts.phase {
@@ -281,6 +421,30 @@ fn value_rank(ts: &TargetState) -> u8 {
         NetPhase::Exhausted => 3,
         // A working strategy is the most expensive thing to re-learn.
         NetPhase::Active => 4,
+    }
+}
+
+/// Which targets [`Discovery::export`] persists to disk. Only state that is
+/// expensive to re-derive is kept:
+///
+/// * `Discover` — a grid sweep is in progress; losing it restarts from Probe.
+/// * `Active` with a promoted strategy — the working bypass for this host.
+/// * `Exhausted` — so 166 candidates are not re-swept on the next launch.
+///
+/// A `Probe` target has learned nothing, and an `Active` passthrough target
+/// (`active.is_none()`) is simply "not blocked here" — both are re-established
+/// for free from the next connection, so persisting them only bloats the
+/// profile file and the reloaded target map.
+///
+/// This is never a delete: a target that stops being persist-worthy just drops
+/// out of the next snapshot, and an older on-disk profile that still lists such
+/// a target self-heals on the following `export`. Each network's file is only
+/// ever created or overwritten in place with that same network's newer state.
+fn persist_worthy(ts: &TargetState) -> bool {
+    match ts.phase {
+        NetPhase::Probe => false,
+        NetPhase::Active => ts.active.is_some(),
+        NetPhase::Discover | NetPhase::Exhausted => true,
     }
 }
 
@@ -359,6 +523,274 @@ mod tests {
         assert_eq!(ts.phase, NetPhase::Discover);
         assert!(ts.from_disk);
         // server TTL carried too -> overlap gating still applies for this target.
+    }
+
+    /// B1: `export` persists only the targets that are expensive to re-derive.
+    /// A `Probe` target (no verdict yet) and an `Active` passthrough target
+    /// (not blocked) are dropped from the snapshot; `Discover`, `Exhausted`,
+    /// and `Active`-with-a-strategy targets are kept.
+    #[test]
+    fn export_skips_probe_and_passthrough_targets() {
+        let d = Discovery::new(&EvasionConfig::default());
+
+        // not blocked -> Active passthrough (active = None).
+        d.assign("clean.example", None);
+        d.record("clean.example", None, FlowOutcome::Success);
+
+        // probe only, no verdict -> still Probe.
+        d.assign("pending.example", None);
+
+        // blocked, mid-sweep -> Discover.
+        d.assign("blocked.example", None);
+        d.record("blocked.example", None, FlowOutcome::DpiReset);
+
+        // blocked, a candidate promoted -> Active with a real strategy.
+        let w = "working.example";
+        d.assign(w, None);
+        d.record(w, None, FlowOutcome::DpiReset); // -> Discover
+        let a = d.assign(w, None);
+        d.record(w, a.id, FlowOutcome::Success);
+        d.record(w, a.id, FlowOutcome::Success); // promote_after_success = 2
+
+        let file = d.export("k");
+        let mut keys: Vec<&str> = file.targets.iter().map(|t| t.key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["blocked.example", "working.example"],
+            "Probe and not-blocked passthrough targets are not persisted"
+        );
+
+        let working = file.targets.iter().find(|t| t.key == w).unwrap();
+        assert_eq!(working.phase, NetPhase::Active);
+        assert!(working.active.is_some(), "the promoted strategy is persisted");
+
+        // Round-trips cleanly: reload restores exactly the two kept targets.
+        let d2 = Discovery::new(&EvasionConfig::default());
+        let (restored, degraded) = d2.load_persisted(&file);
+        assert_eq!((restored, degraded), (2, 0));
+    }
+
+    /// D-plumbing: verdict timing (latency + retx) reaches the promoted
+    /// candidate's `StrategyQuality`, and survives export -> load. Promotion
+    /// itself is unchanged — this only checks the data is recorded.
+    #[test]
+    fn verdict_timing_reaches_strategy_quality_and_round_trips() {
+        let a = Discovery::new(&EvasionConfig::default());
+        let t = "updates.discord.com";
+        a.assign(t, Some(128));
+        a.record(t, None, FlowOutcome::DpiReset); // -> Discover
+
+        let x = a.assign(t, Some(128));
+        let fast = VerdictTiming { latency: Some(Duration::from_millis(180)), retx: 0 };
+        let faster = VerdictTiming { latency: Some(Duration::from_millis(150)), retx: 0 };
+        a.record_timed(t, x.id, FlowOutcome::Success, fast);
+        a.record_timed(t, x.id, FlowOutcome::Success, faster); // 2nd success -> promoted
+
+        {
+            let m = a.targets.lock();
+            let ts = m.get(t).unwrap();
+            assert_eq!(ts.phase, NetPhase::Active);
+            let q = &ts.scores.get(&ts.active.unwrap()).unwrap().quality;
+            assert_eq!(q.retx_free_successes, 2);
+            assert_eq!(q.slow_successes, 0);
+            assert_eq!(q.min_latency, Some(Duration::from_millis(150)));
+            assert!(q.looks_fast());
+        }
+
+        // Persist -> reload: the quality counters come back.
+        let file = a.export("k");
+        let b = Discovery::new(&EvasionConfig::default());
+        assert_eq!(b.load_persisted(&file), (1, 0));
+        let m = b.targets.lock();
+        let ts = m.get(t).unwrap();
+        let q = &ts.scores.get(&ts.active.unwrap()).unwrap().quality;
+        assert_eq!(q.retx_free_successes, 2);
+        assert_eq!(q.min_latency, Some(Duration::from_millis(150)));
+    }
+
+    /// A success that only landed after a ClientHello retransmit is recorded as
+    /// a *slow* success — the RTO-paying case the latency feature targets.
+    #[test]
+    fn retransmit_success_is_recorded_as_slow() {
+        let a = Discovery::new(&EvasionConfig::default());
+        let t = "slow.example";
+        a.assign(t, None);
+        a.record(t, None, FlowOutcome::DpiReset); // -> Discover
+        let x = a.assign(t, None);
+        a.record_timed(
+            t,
+            x.id,
+            FlowOutcome::Success,
+            VerdictTiming { latency: Some(Duration::from_millis(1300)), retx: 1 },
+        );
+        let m = a.targets.lock();
+        let q = &m.get(t).unwrap().scores.get(&x.id.unwrap()).unwrap().quality;
+        assert_eq!(q.slow_successes, 1);
+        assert_eq!(q.retx_free_successes, 0);
+        assert!(!q.looks_fast());
+    }
+
+    // --- Phase 2: sibling / house-strategy seeding ---
+
+    #[test]
+    fn registered_domain_crude_etld_plus_one() {
+        assert_eq!(registered_domain("gateway-us-east1-c.discord.gg"), "discord.gg");
+        assert_eq!(registered_domain("cdn.discordapp.com"), "discordapp.com");
+        assert_eq!(registered_domain("updates.discord.com"), "discord.com");
+        assert_eq!(registered_domain("discord.com"), "discord.com");
+        assert_eq!(registered_domain("a.b.c.example.com"), "example.com");
+        assert_eq!(registered_domain("bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(registered_domain("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(registered_domain("localhost"), "localhost");
+        assert_eq!(registered_domain("trailing.dot.com."), "dot.com");
+    }
+
+    /// REGRESSION (explicitly requested): with nothing `Active` to learn from,
+    /// the seed list is empty and the `Discover` sweep is byte-identical to a
+    /// plain grid walk.
+    #[test]
+    fn no_active_siblings_means_empty_seeds_and_identical_sweep() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        let t = "lonely.example";
+        disc.assign(t, None);
+        disc.record(t, None, FlowOutcome::DpiReset); // -> Discover
+
+        for i in 0..6 {
+            let a = disc.assign(t, None);
+            assert_eq!(a.id, Some(g.all()[i].id()), "candidate {i} follows grid order");
+            assert_eq!(a.seed_tier, None, "no seed offered with nothing Active");
+            disc.record(t, a.id, FlowOutcome::DpiReset);
+        }
+    }
+
+    #[test]
+    fn active_passthrough_sibling_is_not_a_seed_source() {
+        let disc = Discovery::new(&EvasionConfig::default());
+        // clean.example -> Active passthrough (active = None) -> carries no strategy.
+        disc.assign("clean.example", None);
+        disc.record("clean.example", None, FlowOutcome::Success);
+        assert_eq!(disc.target_phase("clean.example"), Some(NetPhase::Active));
+
+        let t = "blocked.example";
+        disc.assign(t, None);
+        disc.record(t, None, FlowOutcome::DpiReset);
+        let a = disc.assign(t, None);
+        assert_eq!(a.seed_tier, None, "an Active-passthrough sibling has no strategy to seed");
+    }
+
+    #[test]
+    fn domain_sibling_strategy_is_seeded_before_the_grid() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let (id0, id1) = (g.all()[0].id(), g.all()[1].id());
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        // Sibling updates.discord.com: block, fail grid[0], promote grid[1].
+        let sib = "updates.discord.com";
+        disc.assign(sib, None);
+        disc.record(sib, None, FlowOutcome::DpiReset); // -> Discover
+        let a0 = disc.assign(sib, None);
+        assert_eq!(a0.id, Some(id0));
+        disc.record(sib, a0.id, FlowOutcome::DpiReset); // grid[0] fails
+        let a1 = disc.assign(sib, None);
+        assert_eq!(a1.id, Some(id1));
+        disc.record(sib, a1.id, FlowOutcome::Success);
+        disc.record(sib, a1.id, FlowOutcome::Success); // grid tier: 2 successes -> promote
+        assert_eq!(disc.target_phase(sib), Some(NetPhase::Active));
+
+        // Fresh same-registered-domain target: first candidate is the sibling's
+        // strategy, NOT grid[0].
+        let fresh = "status.discord.com";
+        disc.assign(fresh, None);
+        disc.record(fresh, None, FlowOutcome::DpiReset); // -> Discover
+        let a = disc.assign(fresh, None);
+        assert_eq!(a.id, Some(id1), "domain-sibling strategy seeded ahead of the grid");
+        assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
+
+        // #4: a domain-sibling seed promotes on its FIRST success.
+        let (ev, phase) = disc.record(fresh, Some(id1), FlowOutcome::Success).unwrap();
+        assert!(
+            matches!(
+                ev,
+                DiscoveryEvent::Promoted { via_seed: Some(SeedTier::DomainSibling), after: 1, .. }
+            ),
+            "got {ev:?}"
+        );
+        assert_eq!(phase, NetPhase::Active);
+    }
+
+    #[test]
+    fn house_strategy_seeds_when_there_is_no_domain_sibling() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let (id0, id1) = (g.all()[0].id(), g.all()[1].id());
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        // a.example: force-promote grid[1].
+        disc.assign("a.example", None);
+        disc.record("a.example", None, FlowOutcome::DpiReset);
+        let x0 = disc.assign("a.example", None);
+        assert_eq!(x0.id, Some(id0));
+        disc.record("a.example", x0.id, FlowOutcome::DpiReset);
+        let x1 = disc.assign("a.example", None);
+        assert_eq!(x1.id, Some(id1));
+        disc.record("a.example", x1.id, FlowOutcome::Success);
+        disc.record("a.example", x1.id, FlowOutcome::Success);
+        assert_eq!(disc.target_phase("a.example"), Some(NetPhase::Active));
+
+        // b.example (unrelated domain): now seeded id1 as the house strategy;
+        // HouseStrategy tier promotes on the first success.
+        disc.assign("b.example", None);
+        disc.record("b.example", None, FlowOutcome::DpiReset);
+        let xb = disc.assign("b.example", None);
+        assert_eq!(xb.id, Some(id1), "seeded from a.example's house strategy");
+        assert_eq!(xb.seed_tier, Some(SeedTier::HouseStrategy));
+        disc.record("b.example", Some(id1), FlowOutcome::Success);
+        assert_eq!(disc.target_phase("b.example"), Some(NetPhase::Active));
+
+        // c.example: no domain sibling, house strategy = id1 (2/2 Active).
+        let t = "c.example";
+        disc.assign(t, None);
+        disc.record(t, None, FlowOutcome::DpiReset);
+        let a = disc.assign(t, None);
+        assert_eq!(a.id, Some(id1));
+        assert_eq!(a.seed_tier, Some(SeedTier::HouseStrategy));
+    }
+
+    #[test]
+    fn a_failed_seed_costs_one_trial_then_the_grid_resumes() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let (id0, id1) = (g.all()[0].id(), g.all()[1].id());
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        // sibling gateway.discord.gg -> promoted to grid[1].
+        let sib = "gateway.discord.gg";
+        disc.assign(sib, None);
+        disc.record(sib, None, FlowOutcome::DpiReset);
+        let a0 = disc.assign(sib, None);
+        disc.record(sib, a0.id, FlowOutcome::DpiReset);
+        let a1 = disc.assign(sib, None);
+        disc.record(sib, a1.id, FlowOutcome::Success);
+        disc.record(sib, a1.id, FlowOutcome::Success);
+
+        // fresh same-domain target: seed id1 is offered, then FAILS.
+        let t = "media.discord.gg";
+        disc.assign(t, None);
+        disc.record(t, None, FlowOutcome::DpiReset);
+        let s = disc.assign(t, None);
+        assert_eq!(s.id, Some(id1));
+        assert_eq!(s.seed_tier, Some(SeedTier::DomainSibling));
+        disc.record(t, Some(id1), FlowOutcome::DpiReset); // seed ruled out
+
+        // next assignment falls through to the grid, not the (now-tried) seed.
+        let nxt = disc.assign(t, None);
+        assert_eq!(nxt.id, Some(id0), "grid sweep resumes at index 0");
+        assert_eq!(nxt.seed_tier, None);
     }
 
     #[test]

@@ -305,6 +305,72 @@ pub fn install_verification() -> String {
     )
 }
 
+// --- interactive launcher (4b) ---------------------------------------------
+
+/// User declined the UAC prompt.
+pub fn launcher_elevate_cancelled() -> String {
+    match get() {
+        Lang::En => {
+            "Administrator permission was not granted.\nBosphorus was not installed.".into()
+        }
+        Lang::Tr => "Yönetici izni verilmedi.\nBosphorus kurulmadı.".into(),
+    }
+}
+
+/// Double-clicked while the service already exists.
+pub fn launcher_already_installed() -> String {
+    match get() {
+        Lang::En => "Bosphorus is already installed and manages itself.\n\n\
+                     To remove it, run in an elevated PowerShell:\n\
+                     \x20\x20\x20\x20bosphorus service uninstall --purge"
+            .into(),
+        Lang::Tr => "Bosphorus zaten kurulu ve kendini yönetiyor.\n\n\
+                     Kaldırmak için yönetici PowerShell'de:\n\
+                     \x20\x20\x20\x20bosphorus service uninstall --purge"
+            .into(),
+    }
+}
+
+/// Install succeeded (shown by the launcher / its elevated re-spawn).
+pub fn launcher_install_ok() -> String {
+    match get() {
+        Lang::En => "Bosphorus is installed and running.\n\n\
+                     It now works fully automatically in the background and starts with Windows.\n\n\
+                     To confirm it really started, run in an elevated PowerShell:\n\
+                     \x20\x20\x20\x20Get-Service Bosphorus\n\
+                     \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
+                     \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+            .into(),
+        Lang::Tr => "Bosphorus kuruldu ve çalışıyor.\n\n\
+                     Artık arka planda tamamen otomatik çalışır ve Windows ile birlikte başlar.\n\n\
+                     Gerçekten başladığını doğrulamak için yönetici PowerShell'de:\n\
+                     \x20\x20\x20\x20Get-Service Bosphorus\n\
+                     \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
+                     \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+            .into(),
+    }
+}
+
+/// Install failed (shown by the launcher / its elevated re-spawn).
+pub fn launcher_install_failed(err: &str) -> String {
+    match get() {
+        Lang::En => format!(
+            "Bosphorus could not be installed.\n\n{err}\n\n\
+             If HVCI / Memory Integrity, Smart App Control, or a WDAC policy is active, the \
+             WinDivert driver cannot load. Check the Event Log:\n\
+             \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
+             \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+        ),
+        Lang::Tr => format!(
+            "Bosphorus kurulamadı.\n\n{err}\n\n\
+             HVCI / Bellek Bütünlüğü, Smart App Control veya bir WDAC politikası etkinse \
+             WinDivert sürücüsü yüklenemez. Olay Günlüğünü kontrol edin:\n\
+             \x20\x20\x20\x20Get-WinEvent -LogName Application -MaxEvents 20 |\n\
+             \x20\x20\x20\x20\x20\x20Where-Object ProviderName -eq 'Bosphorus'"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +402,21 @@ mod tests {
         let en = (t(Msg::OriginDisk), t(Msg::OriginNew));
         set(Lang::Tr);
         assert_eq!(en, (t(Msg::OriginDisk), t(Msg::OriginNew)));
+        set(Lang::En);
+    }
+
+    #[test]
+    fn launcher_strings_switch_with_the_global_lang() {
+        set(Lang::En);
+        assert!(launcher_install_ok().contains("installed and running"));
+        assert!(launcher_install_failed("x").contains("could not be installed"));
+        assert!(launcher_already_installed().contains("uninstall --purge"));
+
+        set(Lang::Tr);
+        assert!(launcher_install_ok().contains("kuruldu ve çalışıyor"));
+        assert!(launcher_install_failed("x").contains("kurulamadı"));
+        assert!(launcher_already_installed().contains("uninstall --purge"));
+
         set(Lang::En);
     }
 }

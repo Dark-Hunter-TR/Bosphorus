@@ -33,3 +33,24 @@ fn custom_max_payload_compiles() {
     let f = filter::build(&cfg).expect("build");
     compile_filter(&f.main, Layer::Network).expect("main filter accepted");
 }
+
+#[test]
+fn default_filter_carries_the_cloudflare_https_alt_ports_and_compiles() {
+    let f = filter::build(&EvasionConfig::default()).expect("build");
+    let s = f.main.to_str().unwrap();
+    for p in ["443", "2083", "2087", "2096"] {
+        assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}");
+        assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}");
+    }
+    compile_filter(&f.main, Layer::Network).expect("alt-port main filter accepted by WinDivert");
+}
+
+#[test]
+fn a_wide_custom_tls_port_set_still_compiles() {
+    let cfg = EvasionConfig {
+        tls_ports: vec![443, 2053, 2083, 2087, 2096, 8443],
+        ..Default::default()
+    };
+    let f = filter::build(&cfg).expect("build");
+    compile_filter(&f.main, Layer::Network).expect("6-port main filter accepted by WinDivert");
+}

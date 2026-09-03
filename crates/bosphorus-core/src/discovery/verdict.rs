@@ -1,5 +1,9 @@
 use crate::conntrack::FlowOutcome;
 
+/// Re-export: verdict scoring input lives in `profile` (where `ScoredStrategy`
+/// consumes it) but reads naturally as `discovery::VerdictTiming`.
+pub use crate::profile::VerdictTiming;
+
 pub fn is_success(o: FlowOutcome) -> bool {
     matches!(o, FlowOutcome::Success)
 }

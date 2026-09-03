@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::config::DiscoveryTuning;
 use crate::conntrack::FlowOutcome;
-use crate::profile::{NetPhase, ScoredStrategy, TargetState, TrialKind};
+use crate::profile::{NetPhase, ScoredStrategy, SeedTier, TargetState, TrialKind, VerdictTiming};
 use crate::strategy::generator::is_overlap_family;
 use crate::strategy::{DefaultGenerator, Strategy, StrategyId};
 
@@ -26,6 +26,9 @@ pub struct Assignment {
     /// an exhausted target back into `Discover`). Transitions caused by a
     /// verdict come from [`Scheduler::record`] instead.
     pub event: Option<DiscoveryEvent>,
+    /// `Some` when this candidate was taken from the seed list (out of grid
+    /// order) rather than the grid sweep — the tier it came from.
+    pub seed_tier: Option<SeedTier>,
 }
 
 /// The state transition a `record` caused (for logging).
@@ -37,8 +40,10 @@ pub enum DiscoveryEvent {
     Blocked,
     /// A candidate failed; moving to the next.
     NextCandidate { tried: usize, total: usize },
-    /// A candidate reached the promotion threshold.
-    Promoted { strategy: String, after: u8 },
+    /// A candidate reached the promotion threshold. `via_seed` is set when the
+    /// promoted candidate came from the seed list (and, for `DomainSibling` /
+    /// `HouseStrategy`, was promoted on its first success).
+    Promoted { strategy: String, after: u8, via_seed: Option<SeedTier> },
     /// The active strategy failed too many times; back to discovery.
     Demoted { strategy: String },
     /// Every grid candidate was tried and none worked.
@@ -56,71 +61,134 @@ pub struct Scheduler {
     pub tuning: DiscoveryTuning,
 }
 
+/// Pick the first seed that is a live grid strategy, not already ruled
+/// out / in-flight, and allowed by `accept`.
+fn pick_seed(
+    priority: &[(StrategyId, SeedTier)],
+    skip: &[StrategyId],
+    gen: &DefaultGenerator,
+    accept: &dyn Fn(&Strategy) -> bool,
+) -> Option<(StrategyId, SeedTier)> {
+    priority.iter().copied().find(|(sid, _)| {
+        if skip.contains(sid) {
+            return false;
+        }
+        match gen.get_by_id(*sid) {
+            Some(s) => accept(s),
+            None => false,
+        }
+    })
+}
+
 impl Scheduler {
-    /// Pick the next trial for `ts`.
+    /// Pick the next trial for `ts` with no seed list (the grid sweep only).
     pub fn assign(
         &self,
         ts: &mut TargetState,
         gen: &DefaultGenerator,
         now: Instant,
     ) -> Assignment {
+        self.assign_seeded(ts, gen, &[], now)
+    }
+
+    /// Pick the next trial for `ts`. In `Discover`, a `priority` seed (a strategy
+    /// that worked on a sibling target, most-confident first) is offered before
+    /// the grid sweep; the seed's [`SeedTier`] is recorded on `ts` so
+    /// [`record_timed`](Self::record_timed) can promote it sooner. A seed that
+    /// is already tried / in-flight / gated / renumbered-away is skipped and the
+    /// grid sweep proceeds exactly as before.
+    pub fn assign_seeded(
+        &self,
+        ts: &mut TargetState,
+        gen: &DefaultGenerator,
+        priority: &[(StrategyId, SeedTier)],
+        now: Instant,
+    ) -> Assignment {
         ts.expire_in_flight(now, self.tuning.in_flight_ttl);
         let revived = Self::revive_if_grid_grew(ts, gen);
 
         let mut a = match ts.phase {
-            NetPhase::Probe => {
-                Assignment { id: None, strategy: None, kind: TrialKind::Control, event: None }
-            }
+            NetPhase::Probe => Assignment {
+                id: None,
+                strategy: None,
+                kind: TrialKind::Control,
+                event: None,
+                seed_tier: None,
+            },
             NetPhase::Active => match ts.active {
-                None => {
-                    Assignment { id: None, strategy: None, kind: TrialKind::Exploit, event: None }
-                }
+                None => Assignment {
+                    id: None,
+                    strategy: None,
+                    kind: TrialKind::Exploit,
+                    event: None,
+                    seed_tier: None,
+                },
                 Some(sid) => Assignment {
                     id: Some(sid),
                     strategy: ts.scores.get(&sid).map(|s| s.strategy.clone()),
                     kind: TrialKind::Exploit,
                     event: None,
+                    seed_tier: None,
                 },
             },
             NetPhase::Discover => {
                 let accept = accept_for(ts.server_initial_ttl);
-                match gen.next_candidate(&ts.skip_ids(), &accept) {
-                    Some(s) => Assignment {
-                        id: Some(s.id()),
-                        strategy: Some(s.clone()),
+                let skip = ts.skip_ids();
+                if let Some((sid, tier)) = pick_seed(priority, &skip, gen, &accept) {
+                    ts.seeded.insert(sid, tier);
+                    Assignment {
+                        id: Some(sid),
+                        strategy: gen.get_by_id(sid).cloned(),
                         kind: TrialKind::Explore,
                         event: None,
-                    },
-                    None => {
-                        // Nothing to hand out. Either every candidate is truly
-                        // ruled out (-> Exhausted), or the rest are just
-                        // in-flight on sibling connections (-> passthrough this
-                        // one, stay in Discover).
-                        if gen.next_candidate(&ts.tried, &accept).is_none() {
-                            ts.phase = NetPhase::Exhausted;
-                            ts.grid_size_at_exhaustion = Some(gen.len());
-                            let tried = ts.tried.len();
-                            ts.compact();
-                            Assignment {
-                                id: None,
-                                strategy: None,
-                                kind: TrialKind::Control,
-                                event: Some(DiscoveryEvent::Exhausted { tried }),
-                            }
-                        } else {
-                            Assignment {
-                                id: None,
-                                strategy: None,
-                                kind: TrialKind::Control,
-                                event: None,
+                        seed_tier: Some(tier),
+                    }
+                } else {
+                    match gen.next_candidate(&skip, &accept) {
+                        Some(s) => Assignment {
+                            id: Some(s.id()),
+                            strategy: Some(s.clone()),
+                            kind: TrialKind::Explore,
+                            event: None,
+                            seed_tier: None,
+                        },
+                        None => {
+                            // Nothing to hand out. Either every candidate is
+                            // truly ruled out (-> Exhausted), or the rest are
+                            // just in-flight on sibling connections
+                            // (-> passthrough this one, stay in Discover).
+                            if gen.next_candidate(&ts.tried, &accept).is_none() {
+                                ts.phase = NetPhase::Exhausted;
+                                ts.grid_size_at_exhaustion = Some(gen.len());
+                                let tried = ts.tried.len();
+                                ts.compact();
+                                Assignment {
+                                    id: None,
+                                    strategy: None,
+                                    kind: TrialKind::Control,
+                                    event: Some(DiscoveryEvent::Exhausted { tried }),
+                                    seed_tier: None,
+                                }
+                            } else {
+                                Assignment {
+                                    id: None,
+                                    strategy: None,
+                                    kind: TrialKind::Control,
+                                    event: None,
+                                    seed_tier: None,
+                                }
                             }
                         }
                     }
                 }
             }
-            NetPhase::Exhausted => {
-                Assignment { id: None, strategy: None, kind: TrialKind::Control, event: None }
-            }
+            NetPhase::Exhausted => Assignment {
+                id: None,
+                strategy: None,
+                kind: TrialKind::Control,
+                event: None,
+                seed_tier: None,
+            },
         };
 
         if revived.is_some() {
@@ -155,13 +223,30 @@ impl Scheduler {
         Some(DiscoveryEvent::Revived { new_total: gen.len(), untried })
     }
 
-    /// Feed back a flow's verdict.
+    /// Feed back a flow's verdict, with no timing information (synthetic
+    /// verdicts, tests). See [`record_timed`](Self::record_timed).
     pub fn record(
         &self,
         ts: &mut TargetState,
         gen: &DefaultGenerator,
         id: Option<StrategyId>,
         outcome: FlowOutcome,
+        now: Instant,
+    ) -> DiscoveryEvent {
+        self.record_timed(ts, gen, id, outcome, VerdictTiming::NONE, now)
+    }
+
+    /// Feed back a flow's verdict along with its [`VerdictTiming`] (latency +
+    /// ClientHello retransmit count), which is folded into the candidate's
+    /// [`StrategyQuality`](crate::profile::StrategyQuality). Timing is recorded
+    /// but does **not** yet influence promotion.
+    pub fn record_timed(
+        &self,
+        ts: &mut TargetState,
+        gen: &DefaultGenerator,
+        id: Option<StrategyId>,
+        outcome: FlowOutcome,
+        timing: VerdictTiming,
         now: Instant,
     ) -> DiscoveryEvent {
         ts.updated_at = now;
@@ -181,7 +266,7 @@ impl Scheduler {
             ts.scores
                 .entry(sid)
                 .or_insert_with(|| ScoredStrategy::new(strat))
-                .note(ok, now);
+                .note(ok, now, timing);
             // Its verdict is in — it no longer blocks a sibling connection.
             ts.clear_in_flight(sid);
         }
@@ -204,7 +289,14 @@ impl Scheduler {
                     ts.consecutive_failure = 0;
                     ts.consecutive_success = ts.consecutive_success.saturating_add(1);
                     if let Some(sid) = id {
-                        if ts.consecutive_success >= self.tuning.promote_after_success {
+                        // A seeded candidate (proven on a same-network sibling)
+                        // promotes on its first success; a grid-swept one still
+                        // needs `promote_after_success`.
+                        let via_seed = ts.seeded.get(&sid).copied();
+                        let threshold = via_seed
+                            .map(|t| t.promote_threshold(self.tuning.promote_after_success))
+                            .unwrap_or(self.tuning.promote_after_success);
+                        if ts.consecutive_success >= threshold {
                             ts.phase = NetPhase::Active;
                             ts.active = Some(sid);
                             ts.in_flight.clear();
@@ -213,11 +305,9 @@ impl Scheduler {
                                 .get(&sid)
                                 .map(|s| s.strategy.describe())
                                 .unwrap_or_default();
+                            let after = ts.consecutive_success;
                             ts.compact(); // keep only the promoted strategy's score
-                            return DiscoveryEvent::Promoted {
-                                strategy,
-                                after: ts.consecutive_success,
-                            };
+                            return DiscoveryEvent::Promoted { strategy, after, via_seed };
                         }
                     }
                     DiscoveryEvent::Noted

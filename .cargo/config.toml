@@ -1,0 +1,9 @@
+# WinDivert 2.2.2 binaries live under assets/ (git-ignored, fetched from the
+# official basil00/WinDivert v2.2.2 release). `relative = true` resolves this
+# against the parent of the `.cargo` folder, i.e. the workspace root.
+#
+# If your Cargo is old enough that `relative` misbehaves, replace with an
+# absolute path, e.g.:
+#   WINDIVERT_PATH = "D:/Bosphorus/assets/WinDivert-2.2.2-A/x64"
+[env]
+WINDIVERT_PATH = { value = "assets/WinDivert-2.2.2-A/x64", relative = true }

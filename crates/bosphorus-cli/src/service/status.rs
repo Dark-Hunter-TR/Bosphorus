@@ -29,8 +29,14 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 fn newest_profile() -> Option<(String, u64)> {
+    newest_profile_in(&super::profiles_dir())
+}
+
+/// Newest `*.json` in `dir` as `(file name, age in seconds)`. `None` if the
+/// directory is missing / unreadable or holds no JSON file.
+fn newest_profile_in(dir: &std::path::Path) -> Option<(String, u64)> {
     let mut best: Option<(String, SystemTime)> = None;
-    for entry in std::fs::read_dir(super::profiles_dir()).ok()?.flatten() {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if entry.path().extension().and_then(OsStr::to_str) != Some("json") {
             continue;
         }
@@ -41,6 +47,49 @@ fn newest_profile() -> Option<(String, u64)> {
         }
     }
     let (name, mtime) = best?;
-    let age = SystemTime::now().duration_since(mtime).ok()?.as_secs();
+    let age = SystemTime::now().duration_since(mtime).unwrap_or_default().as_secs();
     Some((name, age))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_profile_in;
+    use std::time::Duration;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bosphorus-status-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn none_when_dir_missing_or_empty_or_only_non_json() {
+        let d = scratch("empty");
+        assert!(newest_profile_in(&d).is_none(), "missing dir");
+
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(newest_profile_in(&d).is_none(), "empty dir");
+
+        std::fs::write(d.join("notes.txt"), b"x").unwrap();
+        assert!(newest_profile_in(&d).is_none(), "no .json present");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn picks_the_most_recently_written_json_and_ignores_others() {
+        let d = scratch("newest");
+        std::fs::create_dir_all(&d).unwrap();
+
+        std::fs::write(d.join("aaaa.json"), b"{}").unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        std::fs::write(d.join("bbbb.json"), b"{}").unwrap();
+        std::fs::write(d.join("ignore.txt"), b"x").unwrap();
+
+        let (name, age) = newest_profile_in(&d).expect("a json profile is found");
+        assert_eq!(name, "bbbb.json", "newest by mtime wins");
+        assert!(age < 60, "age looks sane: {age}s");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

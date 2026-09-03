@@ -13,25 +13,40 @@ pub struct Filters {
     pub quic_drop: Option<CString>,
 }
 
+/// `(tcp.DstPort == 443 or tcp.DstPort == 2083 or ...)` for `field`
+/// (`tcp.DstPort` / `tcp.SrcPort`) over every configured TLS port.
+fn port_clause(ports: &[u16], field: &str) -> String {
+    let inner = ports
+        .iter()
+        .map(|p| format!("{field} == {p}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("({inner})")
+}
+
 /// Build the filter strings from config. String assembly only — call
 /// `bosphorus_divert::compile_filter` to check them against WinDivert.
 pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
     let maxpayload = t::MAXPAYLOAD_FMT.replace("{n}", &cfg.max_payload_filter.to_string());
+    let ports = cfg.effective_tls_ports();
 
     // Inbound verdict clause: SYN-ACK (passive TTL, M7), RST (DpiReset), and the
     // first data segment of a TLS response — `Payload[0] == 0x16` confirmed in
     // M0/V1 as a reliable ServerHello marker (WinDivert does no reassembly).
     let inbound = format!(
-        "(inbound and tcp.SrcPort == 443 and \
+        "(inbound and {src_ports} and \
            ((tcp.Syn and tcp.Ack) or tcp.Rst or (tcp.PayloadLength > 0 and tcp.Payload[0] == 0x16)) \
            and ({v4src} or {v6src}))",
+        src_ports = port_clause(ports, "tcp.SrcPort"),
         v4src = t::NO_LOCALNETS_V4_SRC,
         v6src = t::NO_LOCALNETS_V6_SRC,
     );
 
-    // Outbound clause: mirrors GoodbyeDPI's outbound half, 443 only.
+    // Outbound clause: mirrors GoodbyeDPI's outbound half. 443 plus the
+    // Cloudflare HTTPS-alt ports (see `EvasionConfig::tls_ports`).
     let outbound = format!(
-        "(outbound and tcp.DstPort == 443 and tcp.Ack and ({v4dst} or {v6dst}))",
+        "(outbound and {dst_ports} and tcp.Ack and ({v4dst} or {v6dst}))",
+        dst_ports = port_clause(ports, "tcp.DstPort"),
         v4dst = t::NO_LOCALNETS_V4_DST,
         v6dst = t::NO_LOCALNETS_V6_DST,
     );
@@ -100,5 +115,38 @@ mod tests {
             ..Default::default()
         };
         assert!(build(&cfg).unwrap().quic_drop.is_none());
+    }
+
+    #[test]
+    fn default_filter_covers_the_cloudflare_https_alt_ports() {
+        let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
+        for p in [443u16, 2083, 2087, 2096] {
+            assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}: {s}");
+            assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}: {s}");
+        }
+        assert_eq!(count(&s, '('), count(&s, ')'), "unbalanced: {s}");
+    }
+
+    #[test]
+    fn tls_ports_are_configurable_and_empty_falls_back_to_443() {
+        let custom = EvasionConfig { tls_ports: vec![443, 8443], ..Default::default() };
+        let s = build(&custom).unwrap().main.into_string().unwrap();
+        assert!(s.contains("tcp.DstPort == 8443"));
+        assert!(!s.contains("2096"));
+
+        let cleared = EvasionConfig { tls_ports: vec![], ..Default::default() };
+        let s = build(&cleared).unwrap().main.into_string().unwrap();
+        assert!(s.contains("(tcp.DstPort == 443)"));
+        assert!(!s.contains("2083"));
+        assert_eq!(count(&s, '('), count(&s, ')'));
+    }
+
+    #[test]
+    fn port_clause_shape() {
+        assert_eq!(
+            port_clause(&[443, 2096], "tcp.DstPort"),
+            "(tcp.DstPort == 443 or tcp.DstPort == 2096)"
+        );
+        assert_eq!(port_clause(&[443], "tcp.SrcPort"), "(tcp.SrcPort == 443)");
     }
 }

@@ -158,3 +158,51 @@ fn parse_args(args: &[OsString]) -> (crate::i18n::Lang, bool, Option<PathBuf>) {
 fn pos_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    fn argv(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parse_args_defaults_to_en_no_overlap_no_dir() {
+        let (lang, overlap, dir) = parse_args(&argv(&["service", "run"]));
+        assert_eq!(lang, Lang::En);
+        assert!(!overlap);
+        assert!(dir.is_none());
+    }
+
+    #[test]
+    fn parse_args_reads_lang_overlap_and_profile_dir() {
+        let (lang, overlap, dir) = parse_args(&argv(&[
+            "service",
+            "run",
+            "--lang",
+            "tr",
+            "--enable-overlap",
+            "--profile-dir",
+            r"C:\pd",
+        ]));
+        assert_eq!(lang, Lang::Tr);
+        assert!(overlap);
+        assert_eq!(dir, Some(PathBuf::from(r"C:\pd")));
+    }
+
+    #[test]
+    fn parse_args_unknown_lang_falls_back_to_en() {
+        let (lang, _, _) = parse_args(&argv(&["service", "run", "--lang", "xx"]));
+        assert_eq!(lang, Lang::En);
+    }
+
+    #[test]
+    fn pos_value_returns_following_token_or_none() {
+        let s = vec!["--a".to_string(), "1".to_string(), "--b".to_string()];
+        assert_eq!(pos_value(&s, "--a"), Some("1"));
+        assert_eq!(pos_value(&s, "--b"), None); // last token, nothing after
+        assert_eq!(pos_value(&s, "--c"), None); // absent
+    }
+}

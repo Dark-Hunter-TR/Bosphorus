@@ -11,7 +11,7 @@ use bosphorus_core::strategy::{
     SplitAnchor, Strategy, TtlPolicy, ACK_DELTA, SEQ_DELTA,
 };
 use bosphorus_core::{filter, Engine, EvasionConfig, NetKeyFn, ProfilePaths, StopFlag};
-use bosphorus_divert::{compile_filter, DivertError, Layer, OpenFlags, WinDivertHandle};
+use bosphorus_divert::{compile_filter, DivertError, Layer, OpenFlags, Param, WinDivertHandle};
 
 use crate::divert_backend::{WinDivertSink, WinDivertSource};
 
@@ -460,6 +460,12 @@ pub fn run_engine(
         }
         Err(e) => anyhow::bail!("{}", crate::i18n::err_windivert_open(&e.to_string(), "")),
     };
+    // D2: raise the driver's kernel queue above the 4096-packet / 2000-ms
+    // defaults (same values GoodbyeDPI uses) so a bulk transfer isn't throttled
+    // by the queue filling faster than our recv loop drains it.
+    let _ = h.set_param(Param::QueueLength, 16_384);
+    let _ = h.set_param(Param::QueueTime, 8_000);
+
     let (maj, min) = h.version().unwrap_or((0, 0));
     println!("WinDivert {maj}.{min}");
 

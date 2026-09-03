@@ -20,6 +20,7 @@ mod divert_backend;
 mod engine_cmd;
 mod eventlog;
 mod i18n;
+mod launcher;
 mod logging;
 mod mem_bench;
 mod netkey;
@@ -32,7 +33,7 @@ mod service;
 
 use engine_cmd::StrategyArg;
 
-fn usage() {
+pub(crate) fn usage() {
     eprintln!("bosphorus (M5)\n");
     eprintln!("USAGE:");
     eprintln!("    bosphorus --selftest");
@@ -114,6 +115,7 @@ fn main() -> anyhow::Result<()> {
                 StrategyArg::One(s) => engine_cmd::run_engine(secs, Some(s), enable_overlap),
             },
         },
+        None => launcher::run(),
         _ => {
             usage();
             std::process::exit(2);

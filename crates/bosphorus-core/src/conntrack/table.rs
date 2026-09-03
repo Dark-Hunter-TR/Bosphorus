@@ -17,6 +17,10 @@ pub struct ResolvedFlow {
     pub outcome: FlowOutcome,
     pub target_key: Option<String>,
     pub trial: Option<TrialRecord>,
+    /// ClientHello -> verdict wall time (`None` if no ClientHello was seen).
+    pub latency: Option<Duration>,
+    /// ClientHello retransmits observed before the verdict.
+    pub retx: u8,
 }
 
 const SHARDS: usize = 16;
@@ -131,6 +135,10 @@ impl FlowTable {
                         outcome: o,
                         target_key: st.target_key.clone(),
                         trial: st.trial,
+                        latency: st
+                            .client_hello_at
+                            .map(|t| now.saturating_duration_since(t)),
+                        retx: st.client_hello_retx,
                     });
                 }
             }

@@ -33,7 +33,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         force: args.iter().any(|a| a == "--force"),
     };
     crate::i18n::set(opts.lang);
-    install(&opts)
+
+    // Elevated re-spawn from the double-click launcher: its console is hidden,
+    // so also surface the outcome in a MessageBox.
+    let from_launcher = args.iter().any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG);
+    let res = install(&opts);
+    if from_launcher {
+        crate::launcher::show_install_result(&res);
+    }
+    res
 }
 
 /// Shared with the interactive launcher (4b). Console output only — the
@@ -55,19 +63,7 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     )
     .map_err(super::map_scm_err)?;
 
-    let mut launch_arguments: Vec<OsString> = vec![
-        "service".into(),
-        "run".into(),
-        "--lang".into(),
-        lang_code(opts.lang).into(),
-    ];
-    if opts.enable_overlap {
-        launch_arguments.push("--enable-overlap".into());
-    }
-    if let Some(p) = &opts.profile_dir {
-        launch_arguments.push("--profile-dir".into());
-        launch_arguments.push(p.clone().into_os_string());
-    }
+    let launch_arguments = build_launch_arguments(opts);
 
     let info = ServiceInfo {
         name: OsString::from(super::SERVICE_NAME),
@@ -114,6 +110,25 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     println!("{}", crate::i18n::svc_created(super::SERVICE_NAME));
     println!("{}", crate::i18n::install_verification());
     Ok(())
+}
+
+/// The `service run` argv the SCM launches the service with. Kept separate
+/// from [`install`] so it can be unit-tested without touching the SCM.
+fn build_launch_arguments(opts: &Opts) -> Vec<OsString> {
+    let mut v: Vec<OsString> = vec![
+        "service".into(),
+        "run".into(),
+        "--lang".into(),
+        lang_code(opts.lang).into(),
+    ];
+    if opts.enable_overlap {
+        v.push("--enable-overlap".into());
+    }
+    if let Some(p) = &opts.profile_dir {
+        v.push("--profile-dir".into());
+        v.push(p.clone().into_os_string());
+    }
+    v
 }
 
 fn lang_code(l: crate::i18n::Lang) -> &'static str {
@@ -183,5 +198,62 @@ fn preflight_windivert(force: bool) -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => anyhow::bail!("pre-flight WinDivertOpen: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Lang;
+
+    fn opts(lang: Lang, enable_overlap: bool, profile_dir: Option<PathBuf>) -> Opts {
+        Opts {
+            lang,
+            enable_overlap,
+            profile_dir,
+            install_dir: None,
+            start_demand: false,
+            force: false,
+        }
+    }
+
+    fn as_strings(v: &[OsString]) -> Vec<String> {
+        v.iter().map(|o| o.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn launch_arguments_minimal_is_just_service_run_lang() {
+        let v = build_launch_arguments(&opts(Lang::En, false, None));
+        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en"]);
+    }
+
+    #[test]
+    fn launch_arguments_carry_overlap_and_profile_dir_in_order() {
+        let v = build_launch_arguments(&opts(Lang::Tr, true, Some(PathBuf::from(r"C:\pd"))));
+        assert_eq!(
+            as_strings(&v),
+            ["service", "run", "--lang", "tr", "--enable-overlap", "--profile-dir", r"C:\pd"]
+        );
+    }
+
+    #[test]
+    fn launch_arguments_omit_profile_dir_key_when_none() {
+        let v = build_launch_arguments(&opts(Lang::En, true, None));
+        assert!(!v.iter().any(|o| o == "--profile-dir"));
+        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en", "--enable-overlap"]);
+    }
+
+    #[test]
+    fn lang_code_maps_both_languages() {
+        assert_eq!(lang_code(Lang::En), "en");
+        assert_eq!(lang_code(Lang::Tr), "tr");
+    }
+
+    #[test]
+    fn value_after_reads_the_following_token_only() {
+        let s = ["--profile-dir".to_string(), "p".to_string(), "--force".to_string()];
+        assert_eq!(value_after(&s, "--profile-dir"), Some("p"));
+        assert_eq!(value_after(&s, "--force"), None); // flag, nothing after
+        assert_eq!(value_after(&s, "--missing"), None);
     }
 }

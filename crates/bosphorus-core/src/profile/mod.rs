@@ -4,7 +4,7 @@
 mod score;
 pub mod persist;
 
-pub use score::ScoredStrategy;
+pub use score::{ScoredStrategy, StrategyQuality};
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -12,6 +12,24 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::strategy::StrategyId;
+
+/// Timing a verdict carries back to discovery scoring. `NONE` = "the caller had
+/// no timing to offer" (synthetic verdicts, tests). Produced by the engine from
+/// the flow's `client_hello_at` / `client_hello_retx`; consumed by
+/// [`ScoredStrategy::note`](score::ScoredStrategy::note).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerdictTiming {
+    /// ClientHello -> verdict wall time, when the ClientHello instant was known.
+    pub latency: Option<Duration>,
+    /// ClientHello retransmits observed on the flow before the verdict. `> 0`
+    /// means the handshake paid at least one TCP RTO.
+    pub retx: u8,
+}
+
+impl VerdictTiming {
+    /// No timing information (synthetic verdict / test).
+    pub const NONE: Self = Self { latency: None, retx: 0 };
+}
 
 /// Where a target is in the discovery lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +53,41 @@ pub enum TrialKind {
     Explore,
     /// The promoted active strategy.
     Exploit,
+}
+
+/// Why a candidate was offered out of the normal grid order — the confidence
+/// tier of the seed it came from. Set on the [`TargetState`] when the candidate
+/// is handed out; drives the promotion threshold (see
+/// [`SeedTier::promote_threshold`]) and is echoed on
+/// [`DiscoveryEvent::Promoted`](crate::discovery::DiscoveryEvent::Promoted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedTier {
+    /// The promoted strategy of an `Active` target sharing this target's
+    /// registered domain, on the same network. Highest confidence.
+    DomainSibling,
+    /// The most common `active` strategy across every `Active` target in the
+    /// session ("house strategy"). Domain-independent but a strong prior.
+    HouseStrategy,
+    /// Reserved: a co-located `Active` target (same resolved IP block). Not yet
+    /// wired — it needs the server IP plumbed into `assign` — so nothing
+    /// constructs this variant today.
+    IpProximity,
+}
+
+impl SeedTier {
+    /// Consecutive successes before a candidate offered under this tier is
+    /// promoted. `default` is the normal `promote_after_success`.
+    ///
+    /// `DomainSibling` / `HouseStrategy` promote on the **first** success: the
+    /// strategy is already proven on the same network, and a wrong seed
+    /// self-corrects via `demote_after_failure`. `IpProximity` is weaker, so it
+    /// keeps the default threshold.
+    pub fn promote_threshold(self, default: u8) -> u8 {
+        match self {
+            SeedTier::DomainSibling | SeedTier::HouseStrategy => 1,
+            SeedTier::IpProximity => default,
+        }
+    }
 }
 
 /// Recorded on a flow so the verdict can be attributed back to the trial.
@@ -89,6 +142,12 @@ pub struct TargetState {
     /// True if this target was restored from a persisted profile this session
     /// (for the summary table's `disk` / `new` mark). Not persisted.
     pub from_disk: bool,
+
+    // --- Phase 2: sibling / house-strategy seeding ---
+    /// Candidates that were handed out from the seed list (out of grid order)
+    /// rather than by the grid sweep, and the tier they came from. Drives the
+    /// per-candidate promotion threshold. Not persisted; cleared by `compact`.
+    pub seeded: HashMap<StrategyId, SeedTier>,
 }
 
 impl TargetState {
@@ -108,6 +167,7 @@ impl TargetState {
             last_assigned_at: None,
             grid_size_at_exhaustion: None,
             from_disk: false,
+            seeded: HashMap::new(),
         }
     }
 
@@ -161,6 +221,8 @@ impl TargetState {
         self.scores.shrink_to_fit();
         self.tried.shrink_to_fit();
         self.in_flight.shrink_to_fit();
+        self.seeded.clear();
+        self.seeded.shrink_to_fit();
     }
 
     /// Highest success-ratio strategy that has at least one success.

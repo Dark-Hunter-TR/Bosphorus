@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bosphorus_divert::{Address, DivertError, Layer, OpenFlags, WinDivertHandle, RECV_BUF_HINT};
+use bosphorus_divert::{
+    Address, DivertError, Layer, OpenFlags, Param, WinDivertHandle, RECV_BUF_HINT,
+};
 
 pub fn run(secs: Option<u64>) -> anyhow::Result<()> {
     let filter = "tcp and (tcp.SrcPort == 443 or tcp.DstPort == 443)";
@@ -21,6 +23,12 @@ pub fn run(secs: Option<u64>) -> anyhow::Result<()> {
         }
         Err(e) => anyhow::bail!("WinDivertOpen basarisiz: {e}"),
     };
+
+    // D2: raise the driver's kernel queue above the 4096-packet / 2000-ms
+    // defaults (same values GoodbyeDPI uses) so a bulk transfer isn't throttled
+    // by the queue filling faster than our recv loop drains it.
+    let _ = h.set_param(Param::QueueLength, 16_384);
+    let _ = h.set_param(Param::QueueTime, 8_000);
 
     let (maj, min) = h.version().unwrap_or((0, 0));
     println!("passthru: WinDivert {maj}.{min}");

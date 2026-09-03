@@ -175,6 +175,11 @@ the key.
 - The profile records, per target: phase, the `tried` list, per-candidate
   success/trial counts, the promoted strategy, and the server's guessed initial
   TTL.
+- **Only targets worth re-learning are written**: a `Discover` sweep in
+  progress, an `Active` target with a promoted strategy, or an `Exhausted` one.
+  Hosts that were never blocked (probe succeeded) are *not* persisted — they
+  need no strategy and are re-established for free on the next connection, so
+  they would only bloat the file.
 - A **grid signature** (FNV-1a over every candidate id) is stored too. If the
   grid changed between builds, stale entries degrade gracefully to "keep only the
   learned TTL" instead of trusting renumbered ids.
@@ -182,6 +187,12 @@ the key.
 - If the fingerprint can't be read, the key is `nonet` and that session is kept
   **in memory only** — a failed probe on an unknown network never pollutes a real
   network's file.
+- **A network's profile is never deleted.** Each NetKey's file is only ever
+  created or overwritten in place with that same network's newer state (atomic
+  temp-file + rename). Switching networks flushes the old network's file and
+  loads the new one's — it never touches, merges, or removes any other
+  network's file. Roam between home, office, and a phone hotspot for months and
+  every network keeps its own learned strategies intact.
 
 ### Live network switching
 
@@ -632,6 +643,11 @@ Hamachi / VPN / Radmin sanal adaptörü anahtarı bozmaz.
 - Profil, hedef başına şunları kaydeder: faz, `tried` listesi, aday başına
   başarı/deneme sayıları, terfi eden strateji ve sunucunun tahmin edilen başlangıç
   TTL'i.
+- **Yalnızca yeniden öğrenmeye değer hedefler yazılır**: devam eden bir
+  `Discover` taraması, terfi etmiş stratejisi olan bir `Active` hedef veya bir
+  `Exhausted` hedef. Hiç engellenmemiş host'lar (probe başarılı) kalıcılaştırılmaz
+  — bir stratejiye ihtiyaçları yoktur ve bir sonraki bağlantıda bedavaya yeniden
+  kurulurlar; kaydetmek yalnızca dosyayı şişirir.
 - Bir **grid imzası** (her aday kimliği üzerinde FNV-1a) da saklanır. Grid
   derlemeler arasında değiştiyse, eski girdiler yeniden numaralandırılmış
   kimliklere güvenmek yerine zarifçe "yalnızca öğrenilen TTL'i tut"a düşer.
@@ -639,6 +655,12 @@ Hamachi / VPN / Radmin sanal adaptörü anahtarı bozmaz.
 - Parmak izi okunamazsa anahtar `nonet` olur ve o oturum **yalnızca bellekte**
   tutulur — bilinmeyen bir ağda başarısız bir probe, gerçek bir ağın dosyasını
   asla kirletmez.
+- **Bir ağın profili asla silinmez.** Her NetKey'in dosyası yalnızca oluşturulur
+  ya da o **aynı ağın** daha yeni durumuyla yerinde üzerine yazılır (atomik
+  geçici dosya + rename). Ağ değiştirmek eski ağın dosyasını diske boşaltır ve
+  yeni ağınkini yükler — başka hiçbir ağın dosyasına dokunmaz, onu birleştirmez
+  ya da silmez. Aylarca ev, ofis ve telefon hotspot'u arasında dolaşın; her ağ
+  kendi öğrendiği stratejileri bozulmadan korur.
 
 ### Canlı ağ değişimi
 
