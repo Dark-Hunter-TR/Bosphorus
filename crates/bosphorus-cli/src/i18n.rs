@@ -69,9 +69,14 @@ pub enum Msg {
 
     // --- interactive launcher TUI (4c) ---
     MenuRunOnce,
+    MenuSelfTest,
     MenuInstall,
     MenuStatus,
     MenuUninstall,
+    MenuCheckFilters,
+    MenuProfile,
+    MenuOpenFolder,
+    MenuAbout,
     MenuLanguage,
     MenuQuit,
     TuiHelp,
@@ -79,6 +84,9 @@ pub enum Msg {
     TuiSvcNotInstalled,
     TuiElevatedStarted,
     TuiPressKey,
+    TuiProfileNone,
+    TuiProfileDeletePrompt,
+    TuiProfileDeleted,
 }
 
 pub fn t(m: Msg) -> &'static str {
@@ -136,6 +144,9 @@ pub fn t(m: Msg) -> &'static str {
         (En, MenuRunOnce) => "Run once (this session only)",
         (Tr, MenuRunOnce) => "Bir kez çalıştır (yalnızca bu oturum)",
 
+        (En, MenuSelfTest) => "Test WinDivert on this PC",
+        (Tr, MenuSelfTest) => "Bu bilgisayarda WinDivert'i test et",
+
         (En, MenuInstall) => "Install as a service (starts with Windows)",
         (Tr, MenuInstall) => "Hizmet olarak kur (Windows ile başlar)",
 
@@ -144,6 +155,18 @@ pub fn t(m: Msg) -> &'static str {
 
         (En, MenuUninstall) => "Uninstall the service",
         (Tr, MenuUninstall) => "Hizmeti kaldır",
+
+        (En, MenuCheckFilters) => "Check filter syntax (no Administrator needed)",
+        (Tr, MenuCheckFilters) => "Filtre sözdizimini kontrol et (Yönetici gerekmez)",
+
+        (En, MenuProfile) => "Discovery profile (view / reset)",
+        (Tr, MenuProfile) => "Keşif profili (görüntüle / sıfırla)",
+
+        (En, MenuOpenFolder) => "Open data folder",
+        (Tr, MenuOpenFolder) => "Veri klasörünü aç",
+
+        (En, MenuAbout) => "About",
+        (Tr, MenuAbout) => "Hakkında",
 
         (En, MenuLanguage) => "Language",
         (Tr, MenuLanguage) => "Dil",
@@ -165,6 +188,15 @@ pub fn t(m: Msg) -> &'static str {
 
         (En, TuiPressKey) => "Press Enter to close this window.",
         (Tr, TuiPressKey) => "Bu pencereyi kapatmak için Enter'a basın.",
+
+        (En, TuiProfileNone) => "No discovery profile yet — nothing has been learned.",
+        (Tr, TuiProfileNone) => "Henüz keşif profili yok — hiçbir şey öğrenilmedi.",
+
+        (En, TuiProfileDeletePrompt) => "Type d + Enter to delete this profile and relearn, or just Enter to go back:",
+        (Tr, TuiProfileDeletePrompt) => "Bu profili silip yeniden öğrenmek için d + Enter, geri dönmek için sadece Enter:",
+
+        (En, TuiProfileDeleted) => "Profile deleted. Bosphorus will relearn from scratch.",
+        (Tr, TuiProfileDeleted) => "Profil silindi. Bosphorus sıfırdan öğrenecek.",
     }
 }
 

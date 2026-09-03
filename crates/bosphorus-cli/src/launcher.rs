@@ -62,23 +62,49 @@ pub fn decide(double_click: bool) -> Screen {
     }
 }
 
-/// A row in the menu.
+/// A row in the menu. Split by how it's handled:
+///   * "exit" rows end the menu and `run()` acts on them (possibly elevating);
+///   * "inline" rows run inside the menu loop and return to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItem {
+    // exit rows
     RunOnce,
+    SelfTest,
     InstallService,
-    ShowStatus,
     UninstallService,
-    ToggleLang,
     Quit,
+    // inline rows
+    ShowStatus,
+    CheckFilters,
+    ProfileInfo,
+    OpenDataFolder,
+    About,
+    ToggleLang,
 }
 
-/// What the user picked (the render-loop swallows `ToggleLang`).
+impl MenuItem {
+    /// Inline rows are handled without leaving the menu.
+    fn is_inline(self) -> bool {
+        matches!(
+            self,
+            MenuItem::ShowStatus
+                | MenuItem::CheckFilters
+                | MenuItem::ProfileInfo
+                | MenuItem::OpenDataFolder
+                | MenuItem::About
+                | MenuItem::ToggleLang
+        )
+    }
+}
+
+/// What the user picked to leave the menu with. Inline rows (status,
+/// check-filters, profile, folder, about, language) never produce one — they
+/// run inside the menu loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherChoice {
     RunOnce,
+    SelfTest,
     InstallService,
-    ShowStatus,
     UninstallService,
     Quit,
 }
@@ -89,9 +115,10 @@ pub enum LauncherChoice {
 pub enum ResolvedAction {
     RunEngineHere,
     ElevateAndRun,
+    RunSelfTestHere,
+    ElevateAndSelfTest,
     InstallHere,
     ElevateAndInstall,
-    StatusHere,
     UninstallHere,
     ElevateAndUninstall,
     Exit,
@@ -111,13 +138,20 @@ impl MenuModel {
     }
 
     pub fn items_for(installed: bool) -> Vec<MenuItem> {
-        let mut v = vec![MenuItem::RunOnce];
+        let mut v = vec![
+            MenuItem::RunOnce,
+            MenuItem::CheckFilters,
+            MenuItem::SelfTest,
+        ];
         if installed {
             v.push(MenuItem::ShowStatus);
             v.push(MenuItem::UninstallService);
         } else {
             v.push(MenuItem::InstallService);
         }
+        v.push(MenuItem::ProfileInfo);
+        v.push(MenuItem::OpenDataFolder);
+        v.push(MenuItem::About);
         v.push(MenuItem::ToggleLang);
         v.push(MenuItem::Quit);
         v
@@ -143,9 +177,10 @@ pub fn dispatch_choice(choice: LauncherChoice, elevated: bool) -> ResolvedAction
     match (choice, elevated) {
         (C::RunOnce, true) => R::RunEngineHere,
         (C::RunOnce, false) => R::ElevateAndRun,
+        (C::SelfTest, true) => R::RunSelfTestHere,
+        (C::SelfTest, false) => R::ElevateAndSelfTest,
         (C::InstallService, true) => R::InstallHere,
         (C::InstallService, false) => R::ElevateAndInstall,
-        (C::ShowStatus, _) => R::StatusHere,
         (C::UninstallService, true) => R::UninstallHere,
         (C::UninstallService, false) => R::ElevateAndUninstall,
         (C::Quit, _) => R::Exit,
@@ -187,6 +222,11 @@ pub fn elevated_run_args(lang: i18n::Lang) -> Vec<OsString> {
     vec!["--engine".into(), "--lang".into(), lang_code(lang).into()]
 }
 
+/// Elevated re-spawn argv for the WinDivert self-test.
+pub fn elevated_selftest_args(lang: i18n::Lang) -> Vec<OsString> {
+    vec!["--selftest".into(), "--lang".into(), lang_code(lang).into()]
+}
+
 // --------------------------------------------------------------------------- //
 //  Entry point
 // --------------------------------------------------------------------------- //
@@ -210,18 +250,19 @@ pub fn run() -> anyhow::Result<()> {
         ResolvedAction::RunEngineHere => crate::engine_cmd::run_engine(None, None, false),
         ResolvedAction::ElevateAndRun => elevate(elevated_run_args(i18n::get()), false),
 
+        ResolvedAction::RunSelfTestHere => {
+            let res = crate::selftest::run_all();
+            pause();
+            res
+        }
+        ResolvedAction::ElevateAndSelfTest => elevate(elevated_selftest_args(i18n::get()), false),
+
         ResolvedAction::InstallHere => {
             let res = crate::service::install::install(&install_opts());
             show_install_result(&res);
             res
         }
         ResolvedAction::ElevateAndInstall => elevate(elevated_install_args(i18n::get()), true),
-
-        ResolvedAction::StatusHere => {
-            let _ = crate::service::status::run();
-            pause();
-            Ok(())
-        }
 
         ResolvedAction::UninstallHere => {
             let res = crate::service::uninstall::run(&["service".into(), "uninstall".into()]);
@@ -324,40 +365,152 @@ fn pause() {
 // --------------------------------------------------------------------------- //
 
 /// Runs the arrow-key menu and returns the user's choice (`Quit` on Esc/Q).
-/// Falls back to a plain numbered prompt when the console has no
-/// virtual-terminal support.
+/// Inline rows (status, check-filters, profile, folder, about, language) run
+/// without leaving the menu. Falls back to a plain numbered prompt when the
+/// console has no virtual-terminal support.
 fn tui_menu(installed: bool) -> LauncherChoice {
-    let guard = match TermGuard::enter() {
+    let mut guard = match TermGuard::enter() {
         Ok(g) => g,
         Err(_) => return plain_menu(installed),
     };
     let mut model = MenuModel::new(installed);
     loop {
         guard.paint(&frame(&model, i18n::get(), installed));
-        match read_key() {
-            Key::Up => model.up(),
-            Key::Down => model.down(),
-            Key::Char('l') | Key::Char('L') => toggle_lang(),
+        let item = match read_key() {
+            Key::Up => {
+                model.up();
+                continue;
+            }
+            Key::Down => {
+                model.down();
+                continue;
+            }
+            Key::Char('l') | Key::Char('L') => MenuItem::ToggleLang,
             Key::Esc | Key::Char('q') | Key::Char('Q') => return LauncherChoice::Quit,
-            Key::Enter => match model.selected() {
-                MenuItem::ToggleLang => toggle_lang(),
-                MenuItem::Quit => return LauncherChoice::Quit,
-                MenuItem::RunOnce => return LauncherChoice::RunOnce,
-                MenuItem::InstallService => return LauncherChoice::InstallService,
-                MenuItem::ShowStatus => return LauncherChoice::ShowStatus,
-                MenuItem::UninstallService => return LauncherChoice::UninstallService,
-            },
-            Key::Char(_) | Key::Other => {}
+            Key::Enter => model.selected(),
+            Key::Char(_) | Key::Other => continue,
+        };
+
+        if item == MenuItem::ToggleLang {
+            toggle_lang();
+            continue;
+        }
+        if item.is_inline() {
+            guard.suspend();
+            run_inline(item);
+            guard.resume();
+            continue;
+        }
+        return match item {
+            MenuItem::RunOnce => LauncherChoice::RunOnce,
+            MenuItem::SelfTest => LauncherChoice::SelfTest,
+            MenuItem::InstallService => LauncherChoice::InstallService,
+            MenuItem::UninstallService => LauncherChoice::UninstallService,
+            MenuItem::Quit => LauncherChoice::Quit,
+            // is_inline() covered the rest
+            _ => LauncherChoice::Quit,
+        };
+    }
+}
+
+/// Runs an inline menu row (its output goes to the normal screen; the caller
+/// has left raw mode). Every branch ends with a "press Enter" pause so the
+/// user can read it before the menu repaints.
+fn run_inline(item: MenuItem) {
+    match item {
+        MenuItem::ShowStatus => {
+            let _ = crate::service::status::run();
+            pause();
+        }
+        MenuItem::CheckFilters => {
+            let _ = crate::engine_cmd::check_filters();
+            pause();
+        }
+        MenuItem::ProfileInfo => profile_info(),
+        MenuItem::OpenDataFolder => {
+            let dir = current_data_dir();
+            let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+            println!("\n  {}", dir.display());
+            pause();
+        }
+        MenuItem::About => {
+            print_about();
+            pause();
+        }
+        _ => {}
+    }
+}
+
+/// `%ProgramData%\Bosphorus` once the service is installed, else
+/// `%LOCALAPPDATA%\Bosphorus` (the interactive data root).
+fn current_data_dir() -> std::path::PathBuf {
+    if crate::service::is_installed() {
+        crate::service::data_dir()
+    } else {
+        std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Bosphorus")
+    }
+}
+
+fn profiles_dir() -> std::path::PathBuf {
+    current_data_dir().join("profiles")
+}
+
+/// Newest `*.json` under `profiles/`, with a crude target / active count.
+fn profile_info() {
+    let dir = profiles_dir();
+    let newest = std::fs::read_dir(&dir).ok().into_iter().flatten().flatten().filter(|e| {
+        e.path().extension().and_then(|x| x.to_str()) == Some("json")
+    });
+    let newest = newest.max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+    match newest {
+        None => {
+            println!("\n  {}", i18n::t(Msg::TuiProfileNone));
+            pause();
+        }
+        Some(entry) => {
+            let path = entry.path();
+            println!("\n  {}", path.display());
+            if let Ok(txt) = std::fs::read_to_string(&path) {
+                let targets = txt.matches("\"key\"").count();
+                let active = txt.matches("\"Active\"").count();
+                println!("  targets: {targets}   active: {active}");
+            }
+            println!("\n  {}", i18n::t(Msg::TuiProfileDeletePrompt));
+            let mut s = String::new();
+            let _ = std::io::stdin().read_line(&mut s);
+            if s.trim().eq_ignore_ascii_case("d") {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => println!("\n  {}", i18n::t(Msg::TuiProfileDeleted)),
+                    Err(e) => println!("\n  {e}"),
+                }
+                pause();
+            }
         }
     }
+}
+
+fn print_about() {
+    println!("\n  Bosphorus — self-learning DPI bypass");
+    println!("  WinDivert 2.2   service name: {}", crate::service::SERVICE_NAME);
+    println!("  data:     {}", current_data_dir().display());
+    println!("  profiles: {}", profiles_dir().display());
+    println!("  logs:     {}", crate::service::logs_dir().display());
 }
 
 fn item_label(item: MenuItem, lang: i18n::Lang) -> String {
     match item {
         MenuItem::RunOnce => i18n::t(Msg::MenuRunOnce).to_string(),
+        MenuItem::SelfTest => i18n::t(Msg::MenuSelfTest).to_string(),
         MenuItem::InstallService => i18n::t(Msg::MenuInstall).to_string(),
-        MenuItem::ShowStatus => i18n::t(Msg::MenuStatus).to_string(),
         MenuItem::UninstallService => i18n::t(Msg::MenuUninstall).to_string(),
+        MenuItem::ShowStatus => i18n::t(Msg::MenuStatus).to_string(),
+        MenuItem::CheckFilters => i18n::t(Msg::MenuCheckFilters).to_string(),
+        MenuItem::ProfileInfo => i18n::t(Msg::MenuProfile).to_string(),
+        MenuItem::OpenDataFolder => i18n::t(Msg::MenuOpenFolder).to_string(),
+        MenuItem::About => i18n::t(Msg::MenuAbout).to_string(),
         MenuItem::ToggleLang => format!(
             "{}: {}",
             i18n::t(Msg::MenuLanguage),
@@ -412,16 +565,21 @@ fn plain_menu(installed: bool) -> LauncherChoice {
         Ok(n) if (1..=model.items.len()).contains(&n) => n - 1,
         _ => return LauncherChoice::Quit,
     };
-    match model.items[idx] {
+    let item = model.items[idx];
+    if item == MenuItem::ToggleLang {
+        toggle_lang();
+        return plain_menu(installed);
+    }
+    if item.is_inline() {
+        run_inline(item);
+        return plain_menu(installed);
+    }
+    match item {
         MenuItem::RunOnce => LauncherChoice::RunOnce,
+        MenuItem::SelfTest => LauncherChoice::SelfTest,
         MenuItem::InstallService => LauncherChoice::InstallService,
-        MenuItem::ShowStatus => LauncherChoice::ShowStatus,
         MenuItem::UninstallService => LauncherChoice::UninstallService,
-        MenuItem::ToggleLang => {
-            toggle_lang();
-            plain_menu(installed)
-        }
-        MenuItem::Quit => LauncherChoice::Quit,
+        _ => LauncherChoice::Quit,
     }
 }
 
@@ -476,6 +634,36 @@ impl TermGuard {
 
     fn paint(&self, frame: &str) {
         print!("{frame}");
+        let _ = std::io::stdout().flush();
+    }
+
+    /// Drop back to the normal screen with cooked input so an inline action's
+    /// output scrolls and `read_line` works.
+    fn suspend(&mut self) {
+        print!("\x1b[?25h\x1b[?1049l");
+        let _ = std::io::stdout().flush();
+        // SAFETY: restoring the modes captured in `enter`.
+        unsafe {
+            let _ = SetConsoleMode(self.out, self.out_mode);
+            let _ = SetConsoleMode(self.inp, self.in_mode);
+        }
+    }
+
+    /// Re-enter the alt screen / raw input after `suspend`.
+    fn resume(&mut self) {
+        // SAFETY: same VT/raw modes as `enter`.
+        unsafe {
+            let vt = CONSOLE_MODE(
+                self.out_mode.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0 | ENABLE_PROCESSED_OUTPUT.0,
+            );
+            let _ = SetConsoleMode(self.out, vt);
+            let raw_in = CONSOLE_MODE(
+                self.in_mode.0
+                    & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0 | ENABLE_PROCESSED_INPUT.0),
+            );
+            let _ = SetConsoleMode(self.inp, raw_in);
+        }
+        print!("\x1b[?1049h\x1b[?25l");
         let _ = std::io::stdout().flush();
     }
 }
@@ -619,39 +807,61 @@ mod tests {
 
     #[test]
     fn menu_items_depend_on_installed_state() {
-        assert_eq!(
-            MenuModel::items_for(false),
-            [
-                MenuItem::RunOnce,
-                MenuItem::InstallService,
-                MenuItem::ToggleLang,
-                MenuItem::Quit
-            ]
-        );
-        assert_eq!(
-            MenuModel::items_for(true),
-            [
-                MenuItem::RunOnce,
-                MenuItem::ShowStatus,
-                MenuItem::UninstallService,
-                MenuItem::ToggleLang,
-                MenuItem::Quit
-            ]
-        );
+        let not_installed = MenuModel::items_for(false);
+        let installed = MenuModel::items_for(true);
+        // the install-vs-status/uninstall swap is the whole "already installed" branch
+        assert!(not_installed.contains(&MenuItem::InstallService));
+        assert!(!not_installed.contains(&MenuItem::ShowStatus));
+        assert!(!not_installed.contains(&MenuItem::UninstallService));
+        assert!(!installed.contains(&MenuItem::InstallService));
+        assert!(installed.contains(&MenuItem::ShowStatus));
+        assert!(installed.contains(&MenuItem::UninstallService));
+        // rows present in both, order stable at the ends
+        for m in [&not_installed, &installed] {
+            assert_eq!(m.first(), Some(&MenuItem::RunOnce));
+            assert_eq!(m.last(), Some(&MenuItem::Quit));
+            assert!(m.contains(&MenuItem::CheckFilters));
+            assert!(m.contains(&MenuItem::SelfTest));
+            assert!(m.contains(&MenuItem::ProfileInfo));
+            assert!(m.contains(&MenuItem::About));
+            assert!(m.contains(&MenuItem::ToggleLang));
+        }
     }
 
     #[test]
     fn menu_cursor_wraps_both_ways() {
-        let mut m = MenuModel::new(false); // 4 items
+        let mut m = MenuModel::new(false);
+        let n = m.items.len();
         assert_eq!(m.cursor, 0);
         m.up();
-        assert_eq!(m.cursor, 3);
+        assert_eq!(m.cursor, n - 1);
         assert_eq!(m.selected(), MenuItem::Quit);
         m.down();
         assert_eq!(m.cursor, 0);
-        m.down();
-        m.down();
-        assert_eq!(m.selected(), MenuItem::ToggleLang);
+        assert_eq!(m.selected(), MenuItem::RunOnce);
+    }
+
+    #[test]
+    fn inline_vs_exit_rows_are_classified() {
+        for i in [
+            MenuItem::ShowStatus,
+            MenuItem::CheckFilters,
+            MenuItem::ProfileInfo,
+            MenuItem::OpenDataFolder,
+            MenuItem::About,
+            MenuItem::ToggleLang,
+        ] {
+            assert!(i.is_inline(), "{i:?}");
+        }
+        for i in [
+            MenuItem::RunOnce,
+            MenuItem::SelfTest,
+            MenuItem::InstallService,
+            MenuItem::UninstallService,
+            MenuItem::Quit,
+        ] {
+            assert!(!i.is_inline(), "{i:?}");
+        }
     }
 
     #[test]
@@ -661,15 +871,15 @@ mod tests {
         // 4b: install decision, now at the (choice, elevated) seam
         assert_eq!(dispatch_choice(C::InstallService, false), R::ElevateAndInstall);
         assert_eq!(dispatch_choice(C::InstallService, true), R::InstallHere);
-        // new: "run once" self-elevates the same way
+        // new two-way elevation: run once + self-test behave like install
         assert_eq!(dispatch_choice(C::RunOnce, false), R::ElevateAndRun);
         assert_eq!(dispatch_choice(C::RunOnce, true), R::RunEngineHere);
-        // new: uninstall
+        assert_eq!(dispatch_choice(C::SelfTest, false), R::ElevateAndSelfTest);
+        assert_eq!(dispatch_choice(C::SelfTest, true), R::RunSelfTestHere);
+        // uninstall
         assert_eq!(dispatch_choice(C::UninstallService, false), R::ElevateAndUninstall);
         assert_eq!(dispatch_choice(C::UninstallService, true), R::UninstallHere);
-        // status needs no elevation; quit is quit
-        assert_eq!(dispatch_choice(C::ShowStatus, false), R::StatusHere);
-        assert_eq!(dispatch_choice(C::ShowStatus, true), R::StatusHere);
+        // quit is quit (status / check-filters / profile / about run inline, never here)
         assert_eq!(dispatch_choice(C::Quit, false), R::Exit);
         assert_eq!(dispatch_choice(C::Quit, true), R::Exit);
     }
@@ -685,6 +895,7 @@ mod tests {
             ["service", "uninstall", "--lang", "tr", "--from-launcher"]
         );
         assert_eq!(as_strs(&elevated_run_args(Lang::En)), ["--engine", "--lang", "en"]);
+        assert_eq!(as_strs(&elevated_selftest_args(Lang::En)), ["--selftest", "--lang", "en"]);
         assert_eq!(elevated_run_args(Lang::Tr)[2], "tr");
     }
 }
