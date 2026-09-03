@@ -17,12 +17,17 @@ pub struct ProfilePaths {
 
 /// TCP ports treated as TLS. A ClientHello to any of these is a discovery /
 /// strategy candidate, and the capture filter's outbound (`DstPort`) and
-/// inbound (`SrcPort`) clauses cover them all. 443 plus the Cloudflare
-/// HTTPS-alternate ports Discord's voice signalling (`*.discord.media`) rides
-/// on — without these that traffic is invisible to the whole bypass path.
-/// Live capture has seen `*.discord.media` on 2053 / 2083 / 2087 (and earlier
-/// 2096); Discord rotates freely across the whole set.
-pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 2053, 2083, 2087, 2096];
+/// inbound (`SrcPort`) clauses cover them all.
+///
+/// This is 443 plus **the complete set of Cloudflare HTTPS-proxied ports**
+/// (2053, 2083, 2087, 2096, 8443) — Cloudflare publishes exactly these, and
+/// Discord (fully Cloudflare-fronted) rotates its `*.discord.media` voice
+/// signalling freely across them. It is deliberately NOT "every port": every
+/// extra port multiplies the per-packet capture/reinject tax over all of the
+/// machine's traffic on that port, and the fake+fragment strategies are
+/// calibrated for HTTPS. Override via [`EvasionConfig::tls_ports`] for a
+/// service that genuinely runs TLS elsewhere.
+pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 2053, 2083, 2087, 2096, 8443];
 
 /// User-facing configuration. Every field has a safe automatic default; the CLI
 /// only fills in explicit overrides.

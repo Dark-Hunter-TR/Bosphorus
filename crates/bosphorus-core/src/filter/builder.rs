@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn default_filter_covers_the_cloudflare_https_alt_ports() {
         let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
-        for p in [443u16, 2053, 2083, 2087, 2096] {
+        for p in [443u16, 2053, 2083, 2087, 2096, 8443] {
             assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}: {s}");
             assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}: {s}");
         }
@@ -129,10 +129,10 @@ mod tests {
 
     #[test]
     fn tls_ports_are_configurable_and_empty_falls_back_to_443() {
-        let custom = EvasionConfig { tls_ports: vec![443, 8443], ..Default::default() };
+        let custom = EvasionConfig { tls_ports: vec![443, 9443], ..Default::default() };
         let s = build(&custom).unwrap().main.into_string().unwrap();
-        assert!(s.contains("tcp.DstPort == 8443"));
-        assert!(!s.contains("2096"));
+        assert!(s.contains("tcp.DstPort == 9443"));
+        assert!(!s.contains("2096"), "default set not used when overridden");
 
         let cleared = EvasionConfig { tls_ports: vec![], ..Default::default() };
         let s = build(&cleared).unwrap().main.into_string().unwrap();
