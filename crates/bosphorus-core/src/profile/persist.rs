@@ -22,8 +22,11 @@ use crate::strategy::{Strategy, StrategyId};
 /// On-disk format version. Bump on an incompatible schema change.
 ///
 /// Still `1` after adding [`PersistedScore::quality`]: the new field is
-/// `#[serde(default)]`, so a v1 file written before this change loads fine and
-/// the quality counters simply start from zero.
+/// `#[serde(default)]`, so a v1 file written before that change loads fine and
+/// the quality counters simply start from zero. Also still `1` after dropping
+/// `PersistedTarget::consecutive_success`: deserialization ignores unknown keys,
+/// so an older file that still carries it loads without complaint (the value is
+/// discarded — the success streak is now per-candidate and not persisted).
 pub const PROFILE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,7 +47,6 @@ pub struct PersistedTarget {
     pub tried: Vec<StrategyId>,
     pub scores: Vec<PersistedScore>,
     pub active: Option<StrategyId>,
-    pub consecutive_success: u8,
     pub consecutive_failure: u8,
     pub server_initial_ttl: Option<u8>,
     pub grid_size_at_exhaustion: Option<usize>,
@@ -122,7 +124,6 @@ mod tests {
                     quality: StrategyQuality::default(),
                 }],
                 active: None,
-                consecutive_success: 0,
                 consecutive_failure: 1,
                 server_initial_ttl: Some(128),
                 grid_size_at_exhaustion: None,

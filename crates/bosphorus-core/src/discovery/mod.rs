@@ -111,7 +111,6 @@ impl Discovery {
                 ts.phase = pt.phase;
                 ts.tried = pt.tried.clone();
                 ts.active = pt.active;
-                ts.consecutive_success = pt.consecutive_success;
                 ts.consecutive_failure = pt.consecutive_failure;
                 ts.grid_size_at_exhaustion = pt.grid_size_at_exhaustion;
                 for sc in &pt.scores {
@@ -121,6 +120,9 @@ impl Discovery {
                             strategy: sc.strategy.clone(),
                             trials: sc.trials,
                             successes: sc.successes,
+                            // Not persisted — a reloaded sweep restarts the
+                            // "in a row" count for every candidate.
+                            consecutive_success: 0,
                             last_success: None,
                             quality: sc.quality.clone(),
                         },
@@ -164,7 +166,6 @@ impl Discovery {
                     })
                     .collect(),
                 active: ts.active,
-                consecutive_success: ts.consecutive_success,
                 consecutive_failure: ts.consecutive_failure,
                 server_initial_ttl: ts.server_initial_ttl,
                 grid_size_at_exhaustion: ts.grid_size_at_exhaustion,
@@ -806,7 +807,6 @@ mod tests {
                 tried: vec![StrategyId(0xdead)], // id not in any real grid
                 scores: vec![],
                 active: None,
-                consecutive_success: 0,
                 consecutive_failure: 2,
                 server_initial_ttl: Some(64),
                 grid_size_at_exhaustion: None,

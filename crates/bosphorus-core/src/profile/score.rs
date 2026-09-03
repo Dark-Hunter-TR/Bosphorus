@@ -62,6 +62,12 @@ pub struct ScoredStrategy {
     pub strategy: Strategy,
     pub trials: u32,
     pub successes: u32,
+    /// Successes in a row for *this* candidate, reset by its own failure. The
+    /// promotion gate reads this — it is deliberately per-candidate: under the
+    /// parallel sweep two different candidates each succeeding once must not add
+    /// up to a promotion (a target-level tally did exactly that). Not persisted:
+    /// "in a row" is a within-session notion, so a reloaded sweep restarts it.
+    pub consecutive_success: u8,
     pub last_success: Option<Instant>,
     /// Latency / retransmit quality (populated from verdict timing).
     pub quality: StrategyQuality,
@@ -73,6 +79,7 @@ impl ScoredStrategy {
             strategy,
             trials: 0,
             successes: 0,
+            consecutive_success: 0,
             last_success: None,
             quality: StrategyQuality::default(),
         }
@@ -81,8 +88,11 @@ impl ScoredStrategy {
         self.trials += 1;
         if ok {
             self.successes += 1;
+            self.consecutive_success = self.consecutive_success.saturating_add(1);
             self.last_success = Some(now);
             self.quality.record_success(timing.latency, timing.retx);
+        } else {
+            self.consecutive_success = 0;
         }
     }
     pub fn failures(&self) -> u32 {
@@ -140,5 +150,21 @@ mod tests {
         assert_eq!(s.successes, 1);
         assert_eq!(s.quality.retx_free_successes, 1);
         assert_eq!(s.quality.min_latency, Some(Duration::from_millis(80)));
+    }
+
+    #[test]
+    fn consecutive_success_counts_this_candidates_streak_and_a_failure_resets_it() {
+        let mut s = ScoredStrategy::new(Strategy::m4_fixed());
+        let t = Instant::now();
+        assert_eq!(s.consecutive_success, 0);
+        s.note(true, t, VerdictTiming::NONE);
+        s.note(true, t, VerdictTiming::NONE);
+        assert_eq!(s.consecutive_success, 2);
+        s.note(false, t, VerdictTiming::NONE);
+        assert_eq!(s.consecutive_success, 0, "own failure clears the streak");
+        s.note(true, t, VerdictTiming::NONE);
+        assert_eq!(s.consecutive_success, 1);
+        // Total successes keep accumulating independently of the streak.
+        assert_eq!(s.successes, 3);
     }
 }

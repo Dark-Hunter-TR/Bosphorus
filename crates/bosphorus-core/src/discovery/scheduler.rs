@@ -245,7 +245,6 @@ impl Scheduler {
         }
         ts.phase = NetPhase::Discover;
         ts.grid_size_at_exhaustion = None;
-        ts.consecutive_success = 0;
         ts.consecutive_failure = 0;
         let untried = gen.all().iter().filter(|s| !ts.tried.contains(&s.id())).count();
         Some(DiscoveryEvent::Revived { new_total: gen.len(), untried })
@@ -301,7 +300,6 @@ impl Scheduler {
 
         match ts.phase {
             NetPhase::Probe => {
-                ts.consecutive_success = 0;
                 ts.consecutive_failure = 0;
                 if ok {
                     ts.phase = NetPhase::Active;
@@ -315,16 +313,21 @@ impl Scheduler {
             NetPhase::Discover => {
                 if ok {
                     ts.consecutive_failure = 0;
-                    ts.consecutive_success = ts.consecutive_success.saturating_add(1);
                     if let Some(sid) = id {
-                        // A seeded candidate (proven on a same-network sibling)
-                        // promotes on its first success; a grid-swept one still
-                        // needs `promote_after_success`.
+                        // The streak is per-candidate (bumped by `note` above):
+                        // a seeded candidate (proven on a same-network sibling)
+                        // promotes on its first success, a grid-swept one still
+                        // needs `promote_after_success` — but only *this*
+                        // candidate's own successes count. Under the parallel
+                        // sweep, another candidate succeeding once must not push
+                        // this one over the line.
+                        let streak =
+                            ts.scores.get(&sid).map(|s| s.consecutive_success).unwrap_or(0);
                         let via_seed = ts.seeded.get(&sid).copied();
                         let threshold = via_seed
                             .map(|t| t.promote_threshold(self.tuning.promote_after_success))
                             .unwrap_or(self.tuning.promote_after_success);
-                        if ts.consecutive_success >= threshold {
+                        if streak >= threshold {
                             ts.phase = NetPhase::Active;
                             ts.active = Some(sid);
                             ts.in_flight.clear();
@@ -333,14 +336,13 @@ impl Scheduler {
                                 .get(&sid)
                                 .map(|s| s.strategy.describe())
                                 .unwrap_or_default();
-                            let after = ts.consecutive_success;
                             ts.compact(); // keep only the promoted strategy's score
-                            return DiscoveryEvent::Promoted { strategy, after, via_seed };
+                            return DiscoveryEvent::Promoted { strategy, after: streak, via_seed };
                         }
                     }
                     DiscoveryEvent::Noted
                 } else {
-                    ts.consecutive_success = 0;
+                    // `note(ok = false)` already reset this candidate's streak.
                     if let Some(sid) = id {
                         if !ts.tried.contains(&sid) {
                             ts.tried.push(sid);
@@ -377,7 +379,6 @@ impl Scheduler {
                         ts.tried.clear();
                         ts.in_flight.clear();
                         ts.consecutive_failure = 0;
-                        ts.consecutive_success = 0;
                         ts.compact(); // active = None -> drops every stale score
                         DiscoveryEvent::Demoted { strategy }
                     } else {
@@ -789,7 +790,7 @@ mod tests {
         let ev = s.record(&mut ts, &g, Some(seed), FlowOutcome::DpiReset, t);
         assert!(matches!(ev, DiscoveryEvent::NextCandidate { .. }));
         assert!(ts.tried.contains(&seed));
-        assert_eq!(ts.consecutive_success, 0);
+        assert_eq!(ts.scores.get(&seed).map(|s| s.consecutive_success), Some(0));
         assert_eq!(ts.phase, NetPhase::Discover);
 
         // Next assign is a plain grid candidate, not the failed seed.
@@ -817,5 +818,83 @@ mod tests {
         assert!(matches!(last, DiscoveryEvent::Demoted { .. }));
         assert_eq!(ts.phase, NetPhase::Discover);
         assert!(ts.tried.is_empty(), "demote clears the sweep");
+    }
+
+    // ---- consecutive-success is per-candidate, not per-target ---------------
+
+    #[test]
+    fn parallel_sweep_does_not_promote_a_candidate_on_another_candidates_success() {
+        let s = sched(); // promote_after_success = 2
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("blocked.example".into(), t);
+
+        // Probe -> Discover.
+        s.assign(&mut ts, &g, t);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t);
+
+        // Two concurrent Explore trials pick distinct candidates A, B.
+        let a = s.assign(&mut ts, &g, t).id.unwrap();
+        let b = s.assign(&mut ts, &g, t).id.unwrap();
+        assert_ne!(a, b);
+        assert_eq!(ts.in_flight.len(), 2);
+
+        // A succeeds once — one ServerHello, below the threshold.
+        assert_eq!(s.record(&mut ts, &g, Some(a), FlowOutcome::Success, t), DiscoveryEvent::Noted);
+        assert_eq!(ts.phase, NetPhase::Discover);
+
+        // B succeeds once. It has a SINGLE ServerHello, so it must NOT promote.
+        // Before the fix the shared counter is at 2 here and B is promoted.
+        assert_eq!(
+            s.record(&mut ts, &g, Some(b), FlowOutcome::Success, t),
+            DiscoveryEvent::Noted,
+            "B promoted on one success, riding A's tally"
+        );
+        assert_eq!(ts.phase, NetPhase::Discover);
+        assert_eq!(ts.active, None);
+
+        // A's OWN second success crosses A's own threshold -> A is promoted.
+        let ev = s.record(&mut ts, &g, Some(a), FlowOutcome::Success, t);
+        assert!(
+            matches!(ev, DiscoveryEvent::Promoted { after: 2, via_seed: None, .. }),
+            "got {ev:?}"
+        );
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.active, Some(a));
+    }
+
+    #[test]
+    fn a_parallel_grid_success_does_not_inflate_a_seeds_promotion_count() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("c-fra.discord.media".into(), t);
+        let seed = g.all()[0].id();
+        let grid = g.all()[1].id();
+
+        // Probe-skip on the seed -> Discover, seed recorded in `seeded`.
+        s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::HouseStrategy)], t);
+        // A parallel grid candidate is handed out too.
+        let a = s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::HouseStrategy)], t);
+        assert_eq!(a.id, Some(grid));
+
+        // The grid candidate succeeds once (does not promote — needs 2).
+        assert_eq!(
+            s.record(&mut ts, &g, Some(grid), FlowOutcome::Success, t),
+            DiscoveryEvent::Noted
+        );
+
+        // The seed's OWN first success promotes it — and `after` is 1, not 2.
+        // Before the fix the grid success pushed the shared counter to 1, so the
+        // seed crossed at a reported `after: 2`.
+        let ev = s.record(&mut ts, &g, Some(seed), FlowOutcome::Success, t);
+        assert!(
+            matches!(
+                ev,
+                DiscoveryEvent::Promoted { after: 1, via_seed: Some(SeedTier::HouseStrategy), .. }
+            ),
+            "got {ev:?}"
+        );
+        assert_eq!(ts.active, Some(seed));
     }
 }

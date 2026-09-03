@@ -63,8 +63,9 @@ Bosphorus removes that step:
 - It watches whether a site actually gets blocked (a DPI `RST`, a blackhole).
 - If it does, it **sweeps a grid of ~166 strategies** for that specific host,
   running several candidates in parallel across concurrent connections.
-- When a candidate produces a real `ServerHello` twice in a row, it is
-  **promoted** and used for every later connection to that host.
+- When a *single* candidate produces a real `ServerHello` twice in a row (its
+  own successes — a different candidate succeeding in a parallel connection does
+  not count), it is **promoted** and used for every later connection to that host.
 - The result is **saved to disk, keyed by the network you were on**, so the next
   time you join that Wi-Fi / LAN the learned strategies are already in place.
 
@@ -138,7 +139,7 @@ and never becomes a target.
   ┌──────────┐  sweep the grid; concurrent connections take different
   │ Discover │  candidates in parallel (tracked as "in-flight")
   └────┬─────┘
-       │ a candidate gets 2 Successes in a row
+       │ one candidate gets 2 of its own Successes in a row
        ▼
   ┌─────────┐   that Strategy is locked in and used for every later
   │ Active  │   connection to this host
@@ -153,7 +154,9 @@ and never becomes a target.
 - **Parallel sweep.** Two connections opening at once to the same blocked host
   are handed *different* untried candidates, so the sweep goes as fast as the app
   retries. An in-flight candidate that never resolves stops blocking the sweep
-  after 15 s.
+  after 15 s. The "2 Successes in a row" promotion count is kept **per
+  candidate**, so two different candidates each succeeding once in parallel do
+  not add up to a promotion.
 - **Retransmit-aware.** Once a strategy has been emitted for a flow, a later
   `ClientHello` on that same flow is a retransmit and is forwarded untouched — no
   amplification.
@@ -529,8 +532,10 @@ Bosphorus bu adımı ortadan kaldırır:
 - Bir sitenin gerçekten engellenip engellenmediğini izler (DPI `RST`'i, karadelik).
 - Engelleniyorsa, o siteye özel olarak **~166 stratejilik bir gridi tarar** ve
   eşzamanlı bağlantılar üzerinden birden fazla adayı paralel dener.
-- Bir aday üst üste iki kez gerçek bir `ServerHello` ürettiğinde o strateji
-  **terfi ettirilir** ve o siteye açılan sonraki tüm bağlantılarda kullanılır.
+- *Tek bir* aday üst üste iki kez kendi başarısıyla gerçek bir `ServerHello`
+  ürettiğinde (paralel bir bağlantıda başka bir adayın başarması sayılmaz) o
+  strateji **terfi ettirilir** ve o siteye açılan sonraki tüm bağlantılarda
+  kullanılır.
 - Sonuç **o an bağlı olduğunuz ağa göre anahtarlanarak diske kaydedilir**; o
   Wi-Fi / yerel ağa bir dahaki katıldığınızda öğrenilen stratejiler zaten hazırdır.
 
@@ -605,7 +610,7 @@ değiştirilmez ve asla hedef olmaz.
   ┌──────────┐  gridi tara; eşzamanlı bağlantılar farklı adayları
   │ Discover │  paralel alır ("uçuşta" olarak izlenir)
   └────┬─────┘
-       │ bir aday üst üste 2 Success alır
+       │ bir aday kendi üst üste 2 Success'ini alır
        ▼
   ┌─────────┐   o Strategy kilitlenir ve bu siteye açılan sonraki
   │ Active  │   tüm bağlantılarda kullanılır
@@ -620,7 +625,8 @@ değiştirilmez ve asla hedef olmaz.
 - **Paralel tarama.** Aynı engelli siteye aynı anda açılan iki bağlantıya
   *farklı*, denenmemiş adaylar verilir; böylece tarama, uygulama yeniden
   denedikçe hızlanır. Hiç çözülmeyen bir "uçuştaki" aday, 15 sn sonra taramayı
-  bloklamayı bırakır.
+  bloklamayı bırakır. "Üst üste 2 Success" terfi sayacı **aday başına** tutulur;
+  paralelde iki farklı adayın birer kez başarması bir terfiye toplanmaz.
 - **Yeniden iletim farkındalığı.** Bir akış için strateji üretildikten sonra, o
   akıştaki sonraki `ClientHello` bir yeniden iletimdir ve dokunulmadan iletilir —
   yükseltme (amplification) olmaz.

@@ -126,7 +126,10 @@ pub struct TargetState {
     pub scores: HashMap<StrategyId, ScoredStrategy>,
     /// In `Active`: the promoted strategy, or `None` = "no strategy needed".
     pub active: Option<StrategyId>,
-    pub consecutive_success: u8,
+    /// Failures in a row for the current phase. Target-level by design: it is the
+    /// demote safety net ("the `Active` strategy is failing regardless of which
+    /// candidate"). The *success* counter, by contrast, lives per-candidate on
+    /// [`ScoredStrategy::consecutive_success`].
     pub consecutive_failure: u8,
     /// Guessed server initial TTL (64 unix / 128 Windows / 255). Set once from
     /// the first SYN-ACK observed for this target; used to gate overlap-family
@@ -166,7 +169,6 @@ impl TargetState {
             tried: Vec::new(),
             scores: HashMap::new(),
             active: None,
-            consecutive_success: 0,
             consecutive_failure: 0,
             server_initial_ttl: None,
             created_at: now,
