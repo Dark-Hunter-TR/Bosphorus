@@ -10,7 +10,7 @@
     ON (bypass). Records time_appconnect, HTTP code, and curl exit
     (35 = TLS reset by DPI, 28 = timeout, 0 = ok). -Repeat loops the whole
     battery so an intermittent reset is caught. This isolates the DPI behaviour
-    on the voice-SIGNALLING path and whether Faz 2 (a)+(b) fixes it.
+    on the voice-SIGNALLING path and whether Phase 2 (a)+(b) fixes it.
 
   PHASE 2 (-GuidedJoins N, semi-automatic):
     --engine runs with discovery=debug; you join/leave a voice channel N times
@@ -115,7 +115,9 @@ function Harvest-MediaHosts {
     $logs = Get-ChildItem (Join-Path $repoRoot 'measure-out') -Recurse -Filter '*.log' -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 6
     foreach ($f in $logs) {
-        foreach ($m in [regex]::Matches((Get-Content -Raw $f.FullName), $rx)) { $set[$m.Value] = $true }
+        $txt = Get-Content -Raw $f.FullName -ErrorAction SilentlyContinue
+        if (-not $txt) { continue }   # empty log file -> [regex]::Matches($null) throws
+        foreach ($m in [regex]::Matches($txt, $rx)) { $set[$m.Value] = $true }
     }
     @($set.Keys) | Select-Object -First 4
 }
