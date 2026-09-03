@@ -217,6 +217,12 @@ impl Discovery {
                 server = %target, new_total, untried,
                 "exhausted target revived — live grid grew past the swept size"
             ),
+            Some(DiscoveryEvent::ProbeSkipped { via }) => tracing::info!(
+                target: "bosphorus::discovery",
+                server = %target, ?via,
+                strategy = a.strategy.as_ref().map(|s| s.describe()),
+                "probe skipped — high-confidence sibling seed applied on first contact"
+            ),
             _ => {}
         }
         a
@@ -702,14 +708,14 @@ mod tests {
         disc.record(sib, a1.id, FlowOutcome::Success); // grid tier: 2 successes -> promote
         assert_eq!(disc.target_phase(sib), Some(NetPhase::Active));
 
-        // Fresh same-registered-domain target: first candidate is the sibling's
-        // strategy, NOT grid[0].
+        // Fresh same-registered-domain target: Faz 2 (b) — the sibling's
+        // strategy is offered on the FIRST contact (naked Probe skipped),
+        // not grid[0].
         let fresh = "status.discord.com";
-        disc.assign(fresh, None);
-        disc.record(fresh, None, FlowOutcome::DpiReset); // -> Discover
         let a = disc.assign(fresh, None);
         assert_eq!(a.id, Some(id1), "domain-sibling strategy seeded ahead of the grid");
         assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
+        assert_eq!(disc.target_phase(fresh), Some(NetPhase::Discover), "no naked Probe");
 
         // #4: a domain-sibling seed promotes on its FIRST success.
         let (ev, phase) = disc.record(fresh, Some(id1), FlowOutcome::Success).unwrap();
@@ -742,10 +748,9 @@ mod tests {
         disc.record("a.example", x1.id, FlowOutcome::Success);
         assert_eq!(disc.target_phase("a.example"), Some(NetPhase::Active));
 
-        // b.example (unrelated domain): now seeded id1 as the house strategy;
-        // HouseStrategy tier promotes on the first success.
-        disc.assign("b.example", None);
-        disc.record("b.example", None, FlowOutcome::DpiReset);
+        // b.example (unrelated domain): now seeded id1 as the house strategy on
+        // first contact (Probe skipped); HouseStrategy tier promotes on the
+        // first success.
         let xb = disc.assign("b.example", None);
         assert_eq!(xb.id, Some(id1), "seeded from a.example's house strategy");
         assert_eq!(xb.seed_tier, Some(SeedTier::HouseStrategy));
@@ -753,10 +758,7 @@ mod tests {
         assert_eq!(disc.target_phase("b.example"), Some(NetPhase::Active));
 
         // c.example: no domain sibling, house strategy = id1 (2/2 Active).
-        let t = "c.example";
-        disc.assign(t, None);
-        disc.record(t, None, FlowOutcome::DpiReset);
-        let a = disc.assign(t, None);
+        let a = disc.assign("c.example", None);
         assert_eq!(a.id, Some(id1));
         assert_eq!(a.seed_tier, Some(SeedTier::HouseStrategy));
     }
@@ -778,16 +780,16 @@ mod tests {
         disc.record(sib, a1.id, FlowOutcome::Success);
         disc.record(sib, a1.id, FlowOutcome::Success);
 
-        // fresh same-domain target: seed id1 is offered, then FAILS.
+        // fresh same-domain target: seed id1 offered on first contact (Probe
+        // skipped), then FAILS.
         let t = "media.discord.gg";
-        disc.assign(t, None);
-        disc.record(t, None, FlowOutcome::DpiReset);
         let s = disc.assign(t, None);
         assert_eq!(s.id, Some(id1));
         assert_eq!(s.seed_tier, Some(SeedTier::DomainSibling));
         disc.record(t, Some(id1), FlowOutcome::DpiReset); // seed ruled out
 
-        // next assignment falls through to the grid, not the (now-tried) seed.
+        // next assignment falls through to the grid, not the (now-tried) seed —
+        // the wrong-seed cost is exactly one trial.
         let nxt = disc.assign(t, None);
         assert_eq!(nxt.id, Some(id0), "grid sweep resumes at index 0");
         assert_eq!(nxt.seed_tier, None);

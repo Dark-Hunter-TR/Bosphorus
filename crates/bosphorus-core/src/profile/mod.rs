@@ -88,6 +88,14 @@ impl SeedTier {
             SeedTier::IpProximity => default,
         }
     }
+
+    /// Tiers confident enough to skip the naked `Probe` on a fresh target: the
+    /// strategy is already proven on the same network, so the odds this host is
+    /// blocked the same way are very high. `IpProximity` is only a locality
+    /// guess, so it still earns its Probe.
+    pub fn is_high_confidence(self) -> bool {
+        matches!(self, SeedTier::DomainSibling | SeedTier::HouseStrategy)
+    }
 }
 
 /// Recorded on a flow so the verdict can be attributed back to the trial.

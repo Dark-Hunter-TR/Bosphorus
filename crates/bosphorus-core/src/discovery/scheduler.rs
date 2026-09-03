@@ -38,6 +38,10 @@ pub enum DiscoveryEvent {
     NotBlocked,
     /// Probe failed — target is blocked; grid sweep begins.
     Blocked,
+    /// The naked `Probe` was skipped: a high-confidence same-network seed
+    /// (`DomainSibling` / `HouseStrategy`) was applied on the very first
+    /// contact instead. The target went straight to `Discover`.
+    ProbeSkipped { via: SeedTier },
     /// A candidate failed; moving to the next.
     NextCandidate { tried: usize, total: usize },
     /// A candidate reached the promotion threshold. `via_seed` is set when the
@@ -108,13 +112,37 @@ impl Scheduler {
         let revived = Self::revive_if_grid_grew(ts, gen);
 
         let mut a = match ts.phase {
-            NetPhase::Probe => Assignment {
-                id: None,
-                strategy: None,
-                kind: TrialKind::Control,
-                event: None,
-                seed_tier: None,
-            },
+            NetPhase::Probe => {
+                // Faz 2 (b): if a high-confidence same-network seed exists
+                // (`DomainSibling` / `HouseStrategy`, i.e. proven on an
+                // Active-with-strategy target — `build_seeds` never sources from
+                // Active-passthrough), skip the naked Probe. Confirming "yes,
+                // blocked" with a bare ClientHello just costs one RST plus a
+                // client retry against a host that then rotates away.
+                let hi: Vec<(StrategyId, SeedTier)> =
+                    priority.iter().copied().filter(|(_, t)| t.is_high_confidence()).collect();
+                let accept = accept_for(ts.server_initial_ttl);
+                match pick_seed(&hi, &ts.skip_ids(), gen, &accept) {
+                    Some((sid, tier)) => {
+                        ts.phase = NetPhase::Discover;
+                        ts.seeded.insert(sid, tier);
+                        Assignment {
+                            id: Some(sid),
+                            strategy: gen.get_by_id(sid).cloned(),
+                            kind: TrialKind::Explore,
+                            event: Some(DiscoveryEvent::ProbeSkipped { via: tier }),
+                            seed_tier: Some(tier),
+                        }
+                    }
+                    None => Assignment {
+                        id: None,
+                        strategy: None,
+                        kind: TrialKind::Control,
+                        event: None,
+                        seed_tier: None,
+                    },
+                }
+            }
             NetPhase::Active => match ts.active {
                 None => Assignment {
                     id: None,
@@ -675,5 +703,119 @@ mod tests {
         let a = s.assign(&mut ts, &g, t0 + Duration::from_secs(60));
         assert_eq!(ts.phase, NetPhase::Exhausted);
         assert!(a.event.is_none() && a.id.is_none());
+    }
+
+    // ---- Faz 2 (b): Probe-skip on a high-confidence seed --------------------
+
+    fn id0(g: &DefaultGenerator) -> StrategyId {
+        g.all()[0].id()
+    }
+
+    #[test]
+    fn probe_is_skipped_for_a_high_confidence_seed_and_promotes_on_first_success() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("c-fra15.discord.media".into(), t);
+        let seed = id0(&g);
+
+        let a = s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::DomainSibling)], t);
+        assert_eq!(a.id, Some(seed));
+        assert_eq!(a.kind, TrialKind::Explore);
+        assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
+        assert!(matches!(a.event, Some(DiscoveryEvent::ProbeSkipped { via: SeedTier::DomainSibling })));
+        assert_eq!(ts.phase, NetPhase::Discover, "went straight to Discover, no naked Probe");
+        assert_eq!(ts.seeded.get(&seed).copied(), Some(SeedTier::DomainSibling));
+
+        // First success => Promoted via the seed (threshold 1), not after 2.
+        let ev = s.record(&mut ts, &g, Some(seed), FlowOutcome::Success, t);
+        assert!(matches!(
+            ev,
+            DiscoveryEvent::Promoted { after: 1, via_seed: Some(SeedTier::DomainSibling), .. }
+        ));
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.active, Some(seed));
+    }
+
+    #[test]
+    fn house_strategy_tier_also_skips_the_probe() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        let a = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::HouseStrategy)], t);
+        assert!(matches!(a.event, Some(DiscoveryEvent::ProbeSkipped { via: SeedTier::HouseStrategy })));
+        assert_eq!(ts.phase, NetPhase::Discover);
+    }
+
+    #[test]
+    fn no_seed_leaves_the_probe_byte_for_byte_unchanged() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+
+        let mut a_ts = TargetState::new("t".into(), t);
+        let a = s.assign_seeded(&mut a_ts, &g, &[], t);
+        let mut b_ts = TargetState::new("t".into(), t);
+        let b = s.assign(&mut b_ts, &g, t);
+
+        assert!(a.id.is_none() && a.event.is_none() && a.seed_tier.is_none());
+        assert_eq!(a.kind, TrialKind::Control);
+        assert_eq!(a.id, b.id);
+        assert_eq!(a_ts.phase, NetPhase::Probe, "no seed => still a naked Probe");
+        assert_eq!(a_ts.phase, b_ts.phase);
+    }
+
+    #[test]
+    fn ip_proximity_seed_is_not_confident_enough_to_skip_the_probe() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        let a = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::IpProximity)], t);
+        assert!(a.id.is_none() && a.event.is_none());
+        assert_eq!(ts.phase, NetPhase::Probe);
+    }
+
+    #[test]
+    fn a_probe_skip_seed_that_fails_falls_through_to_the_grid() {
+        let s = sched();
+        let g = tiny_gen(); // frag@2, frag@3
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        let seed = id0(&g);
+
+        s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::DomainSibling)], t);
+        let ev = s.record(&mut ts, &g, Some(seed), FlowOutcome::DpiReset, t);
+        assert!(matches!(ev, DiscoveryEvent::NextCandidate { .. }));
+        assert!(ts.tried.contains(&seed));
+        assert_eq!(ts.consecutive_success, 0);
+        assert_eq!(ts.phase, NetPhase::Discover);
+
+        // Next assign is a plain grid candidate, not the failed seed.
+        let a = s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::DomainSibling)], t);
+        assert!(a.id.is_some() && a.id != Some(seed));
+        assert_eq!(a.seed_tier, None);
+    }
+
+    #[test]
+    fn demote_still_fires_after_a_probe_skip_promotion() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        let seed = id0(&g);
+
+        s.assign_seeded(&mut ts, &g, &[(seed, SeedTier::HouseStrategy)], t);
+        s.record(&mut ts, &g, Some(seed), FlowOutcome::Success, t); // -> Active
+        assert_eq!(ts.phase, NetPhase::Active);
+
+        let mut last = DiscoveryEvent::Noted;
+        for _ in 0..s.tuning.demote_after_failure {
+            last = s.record(&mut ts, &g, Some(seed), FlowOutcome::DpiReset, t);
+        }
+        assert!(matches!(last, DiscoveryEvent::Demoted { .. }));
+        assert_eq!(ts.phase, NetPhase::Discover);
+        assert!(ts.tried.is_empty(), "demote clears the sweep");
     }
 }
