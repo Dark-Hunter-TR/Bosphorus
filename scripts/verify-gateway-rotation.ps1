@@ -241,12 +241,12 @@ if ($liveGw.Count -eq 0 -and $liveMedia.Count -eq 0) {
     if ($liveMedia.Count) { $S.Add("  media hosts with a live tcp:443 connection        : $($liveMedia -join ', ')") }
     if (($twoGw + $twoMedia).Count -eq 0 -and $seedForGw.Count -eq 0) {
         $S.Add('  Consistent with the theory: each got exactly ONE connection and NO seed was offered.')
-        $S.Add('  => Faz 2 Probe-skip / seed-on-first-connect is justified.')
+        $S.Add('  => Phase 2 Probe-skip / seed-on-first-connect is justified.')
     } else {
         $S.Add('  PARTIALLY REFUTES the theory:')
         if (($twoGw + $twoMedia).Count) { $S.Add("   - >=2 connections: $((($twoGw + $twoMedia)) -join ', ')") }
         if ($seedForGw.Count)           { $S.Add("   - a seed WAS offered ($($seedForGw.Count) lines) - Discover phase reached") }
-        $S.Add('   => re-examine before Faz 2.')
+        $S.Add('   => re-examine before Phase 2.')
     }
 }
 $S.Add('=======================================================================================')

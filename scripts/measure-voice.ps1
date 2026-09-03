@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Faz 1 diagnosis - Discord VOICE-channel join latency (~15 s) + message / gateway
+  Phase 1 diagnosis - Discord VOICE-channel join latency (~15 s) + message / gateway
   load latency. Splits the two symptoms across their real protocol paths.
 
   KEY POINT: on a censored line Discord cannot even finish its updater without the

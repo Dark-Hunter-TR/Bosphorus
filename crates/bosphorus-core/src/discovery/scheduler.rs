@@ -113,7 +113,7 @@ impl Scheduler {
 
         let mut a = match ts.phase {
             NetPhase::Probe => {
-                // Faz 2 (b): if a high-confidence same-network seed exists
+                // Phase 2 (b): if a high-confidence same-network seed exists
                 // (`DomainSibling` / `HouseStrategy`, i.e. proven on an
                 // Active-with-strategy target — `build_seeds` never sources from
                 // Active-passthrough), skip the naked Probe. Confirming "yes,
@@ -705,7 +705,7 @@ mod tests {
         assert!(a.event.is_none() && a.id.is_none());
     }
 
-    // ---- Faz 2 (b): Probe-skip on a high-confidence seed --------------------
+    // ---- Phase 2 (b): Probe-skip on a high-confidence seed -----------------
 
     fn id0(g: &DefaultGenerator) -> StrategyId {
         g.all()[0].id()

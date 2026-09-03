@@ -708,7 +708,7 @@ mod tests {
         disc.record(sib, a1.id, FlowOutcome::Success); // grid tier: 2 successes -> promote
         assert_eq!(disc.target_phase(sib), Some(NetPhase::Active));
 
-        // Fresh same-registered-domain target: Faz 2 (b) — the sibling's
+        // Fresh same-registered-domain target: Phase 2 (b) - the sibling's
         // strategy is offered on the FIRST contact (naked Probe skipped),
         // not grid[0].
         let fresh = "status.discord.com";
