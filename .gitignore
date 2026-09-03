@@ -1,5 +1,25 @@
+# Build output
 /target
+**/*.rs.bk
+
+# WinDivert 2.2.2 binaries — fetched from the official basil00/WinDivert release,
+# not vendored (see .cargo/config.toml -> WINDIVERT_PATH).
 /assets/
+
+# Measurement / diagnostic output (scripts/*.ps1 write here)
+/measure-out/
+
+# Ad-hoc run logs and captures
+*.log
 *.etl
 *.pcapng
-/measure-out/
+*.out.log
+*.err.log
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
