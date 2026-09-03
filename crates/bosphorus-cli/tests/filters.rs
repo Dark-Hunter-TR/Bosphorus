@@ -38,7 +38,7 @@ fn custom_max_payload_compiles() {
 fn default_filter_carries_the_cloudflare_https_alt_ports_and_compiles() {
     let f = filter::build(&EvasionConfig::default()).expect("build");
     let s = f.main.to_str().unwrap();
-    for p in ["443", "2083", "2087", "2096"] {
+    for p in ["443", "2053", "2083", "2087", "2096"] {
         assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}");
         assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}");
     }

@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn default_filter_covers_the_cloudflare_https_alt_ports() {
         let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
-        for p in [443u16, 2083, 2087, 2096] {
+        for p in [443u16, 2053, 2083, 2087, 2096] {
             assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}: {s}");
             assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}: {s}");
         }

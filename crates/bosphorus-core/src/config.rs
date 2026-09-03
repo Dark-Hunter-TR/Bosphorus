@@ -20,7 +20,9 @@ pub struct ProfilePaths {
 /// inbound (`SrcPort`) clauses cover them all. 443 plus the Cloudflare
 /// HTTPS-alternate ports Discord's voice signalling (`*.discord.media`) rides
 /// on — without these that traffic is invisible to the whole bypass path.
-pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 2083, 2087, 2096];
+/// Live capture has seen `*.discord.media` on 2053 / 2083 / 2087 (and earlier
+/// 2096); Discord rotates freely across the whole set.
+pub const DEFAULT_TLS_PORTS: &[u16] = &[443, 2053, 2083, 2087, 2096];
 
 /// User-facing configuration. Every field has a safe automatic default; the CLI
 /// only fills in explicit overrides.
