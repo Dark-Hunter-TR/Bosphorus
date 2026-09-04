@@ -93,14 +93,34 @@ pub fn load(dir: &Path, net_key: &str) -> Option<ProfileFile> {
 /// Atomic write: temp file then rename. Returns the number of JSON bytes
 /// written (fed to the `bosphorus::mem` digest as a proxy for discovery-state
 /// size).
+///
+/// The staging file is named per-process (`<net_key>.json.<pid>.tmp`) so two
+/// processes pointed at the same store — the service and an interactive
+/// `--engine` sharing `%ProgramData%` — never write the same temp. The final
+/// rename is a last-writer-wins atomic replace: the file is never torn, but one
+/// process's incremental learning can overwrite the other's. The profile is a
+/// cache, not a ledger — the next session re-learns — so this is acceptable;
+/// callers just should not run both against one store for long stretches.
 pub fn save(dir: &Path, net_key: &str, file: &ProfileFile) -> io::Result<usize> {
+    save_with_tmp_tag(dir, net_key, file, &std::process::id().to_string())
+}
+
+fn save_with_tmp_tag(
+    dir: &Path,
+    net_key: &str,
+    file: &ProfileFile,
+    tmp_tag: &str,
+) -> io::Result<usize> {
     std::fs::create_dir_all(dir)?;
     let path = profile_path(dir, net_key);
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{tmp_tag}.tmp"));
     let json = serde_json::to_vec_pretty(file).map_err(io::Error::other)?;
     let n = json.len();
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::write(&tmp, &json)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp); // don't leak our staging file on a lost race
+        return Err(e);
+    }
     Ok(n)
 }
 
@@ -153,7 +173,7 @@ mod tests {
         assert_eq!(back.targets[0].server_initial_ttl, Some(128));
         assert_eq!(back.grid_signature, 0xdead_beef);
         // No stray temp file left behind.
-        assert!(!profile_path(dir.path(), key).with_extension("json.tmp").exists());
+        assert!(!tmp_files(dir.path()).iter().any(|_| true), "left a .tmp file");
     }
 
     #[test]
@@ -161,5 +181,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(profile_path(dir.path(), "k"), b"{ not json").unwrap();
         assert!(load(dir.path(), "k").is_none());
+    }
+
+    fn tmp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_second_writers_save_does_not_disturb_the_first_writers_staged_temp() {
+        // Two processes share one store. Writer P1 has staged its temp but not
+        // yet renamed; writer P2 runs a full save meanwhile. Per-process temp
+        // names mean P2 cannot touch P1's staging file, and P2's own write lands
+        // as a valid store.
+        let dir = tempfile::tempdir().unwrap();
+        let key = "net";
+        let p1_tmp = profile_path(dir.path(), key).with_extension("json.p1.tmp");
+        std::fs::write(&p1_tmp, b"P1-STAGED-BYTES").unwrap();
+
+        save_with_tmp_tag(dir.path(), key, &sample(), "p2").unwrap();
+
+        assert_eq!(std::fs::read(&p1_tmp).unwrap(), b"P1-STAGED-BYTES", "P1's temp was clobbered");
+        assert!(load(dir.path(), key).is_some(), "P2's save produced a valid store");
+        // P2 cleaned up after itself; only P1's staging file remains.
+        assert_eq!(tmp_files(dir.path()), vec!["net.json.p1.tmp".to_string()]);
+    }
+
+    #[test]
+    fn back_to_back_saves_to_one_store_leave_a_valid_file_last_writer_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "net";
+        let mut a = sample();
+        a.targets[0].key = "a.example".into();
+        let mut b = sample();
+        b.targets[0].key = "b.example".into();
+
+        save_with_tmp_tag(dir.path(), key, &a, "1111").unwrap();
+        save_with_tmp_tag(dir.path(), key, &b, "2222").unwrap();
+
+        let back = load(dir.path(), key).unwrap();
+        assert_eq!(back.targets.len(), 1);
+        assert_eq!(back.targets[0].key, "b.example", "last writer wins");
+        assert!(tmp_files(dir.path()).is_empty(), "no temp litter");
     }
 }

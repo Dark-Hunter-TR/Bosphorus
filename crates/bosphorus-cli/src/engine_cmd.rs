@@ -139,19 +139,67 @@ fn cfg_for(enable_overlap: bool) -> EvasionConfig {
     EvasionConfig { enable_overlap_disorder: enable_overlap, ..Default::default() }
 }
 
-/// Where discovery profiles live. `override_dir` (from `--profile-dir`) wins when
-/// given — e.g. to point an interactive run at the service's
-/// `%ProgramData%\Bosphorus\profiles` store. Otherwise
-/// `%LOCALAPPDATA%\Bosphorus\profiles` (falling back to the temp dir).
-fn profile_dir(override_dir: Option<PathBuf>) -> PathBuf {
-    if let Some(d) = override_dir {
-        return d;
-    }
+/// Which profile store an interactive `--engine` run resolved to, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileDirSource {
+    /// An explicit `--profile-dir` — always wins.
+    Flag,
+    /// The Windows service is installed and has already learned this network,
+    /// so its `%ProgramData%` store is read/written and the two run modes share
+    /// one per-network memory ("service = authority").
+    ServiceAuthority,
+    /// The per-user `%LOCALAPPDATA%\Bosphorus\profiles` default.
+    PerUser,
+}
+
+/// The per-user default: `%LOCALAPPDATA%\Bosphorus\profiles` (temp-dir fallback).
+fn user_profile_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join("Bosphorus")
         .join("profiles")
+}
+
+/// Pure decision core (unit-tested). `svc_installed` / `svc_file_exists` are the
+/// two facts [`resolve_profile_dir`] gathers from the environment.
+///
+/// 1. an explicit `--profile-dir` is unconditional — it never loses.
+/// 2. else, if the service is installed *and* it already has a profile for this
+///    exact network, use its store (so an interactive run sees, and feeds back
+///    into, what the long-running service learned).
+/// 3. else, the per-user default (unchanged behaviour when no service).
+fn pick_profile_dir(
+    override_dir: Option<PathBuf>,
+    svc_installed: bool,
+    svc_file_exists: bool,
+    svc_dir: PathBuf,
+    user_dir: PathBuf,
+) -> (PathBuf, ProfileDirSource) {
+    if let Some(d) = override_dir {
+        return (d, ProfileDirSource::Flag);
+    }
+    if svc_installed && svc_file_exists {
+        return (svc_dir, ProfileDirSource::ServiceAuthority);
+    }
+    (user_dir, ProfileDirSource::PerUser)
+}
+
+/// Resolve the discovery-profile directory for `net_key`, gathering the service
+/// facts (`is_installed` is a plain SCM `QUERY_STATUS` — no elevation).
+fn resolve_profile_dir(
+    override_dir: Option<PathBuf>,
+    net_key: &str,
+) -> (PathBuf, ProfileDirSource) {
+    let svc_dir = crate::service::profiles_dir();
+    let svc_file_exists = svc_dir.join(format!("{net_key}.json")).is_file();
+    pick_profile_dir(
+        override_dir,
+        crate::service::is_installed(),
+        svc_file_exists,
+        svc_dir,
+        user_profile_dir(),
+    )
 }
 
 fn parse_anchor(s: &str) -> anyhow::Result<SplitAnchor> {
@@ -412,9 +460,12 @@ pub fn run_engine(
     let mut cfg = cfg_for(enable_overlap);
 
     // Persistence: discovery runs only (forced `--strategy` runs stay in-memory).
+    let mut profile_src = None;
     let net_human = if strategy.is_none() {
         let (human, key) = crate::netkey::compute();
-        cfg.profile = Some(ProfilePaths { dir: profile_dir(profile_dir_override), net_key: key });
+        let (dir, src) = resolve_profile_dir(profile_dir_override, &key);
+        profile_src = Some(src);
+        cfg.profile = Some(ProfilePaths { dir, net_key: key });
         Some(human)
     } else {
         None
@@ -439,6 +490,17 @@ pub fn run_engine(
             let loaded = engine.discovery_summary().iter().filter(|t| t.from_disk).count();
             println!("{}", crate::i18n::profile_line(&path.display().to_string()));
             println!("{}", crate::i18n::net_line(human, loaded));
+            if let Some(src) = profile_src {
+                println!(
+                    "  profile store: {}",
+                    match src {
+                        ProfileDirSource::Flag => "--profile-dir (explicit)",
+                        ProfileDirSource::ServiceAuthority =>
+                            "service %ProgramData% (authoritative)",
+                        ProfileDirSource::PerUser => "per-user %LOCALAPPDATA%",
+                    }
+                );
+            }
         }
         if enable_overlap {
             println!("{}", crate::i18n::t(crate::i18n::Msg::OverlapEnabledWarning));
@@ -618,6 +680,49 @@ pub fn run_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn svc() -> PathBuf {
+        PathBuf::from(r"C:\ProgramData\Bosphorus\profiles")
+    }
+    fn usr() -> PathBuf {
+        PathBuf::from(r"C:\Users\me\AppData\Local\Bosphorus\profiles")
+    }
+
+    #[test]
+    fn profile_dir_explicit_flag_always_wins() {
+        let flag = PathBuf::from(r"D:\custom\profiles");
+        for (inst, exists) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(
+                pick_profile_dir(Some(flag.clone()), inst, exists, svc(), usr()),
+                (flag.clone(), ProfileDirSource::Flag),
+                "flag must win for (installed={inst}, file={exists})"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_dir_service_installed_with_this_network_uses_the_service_store() {
+        assert_eq!(
+            pick_profile_dir(None, true, true, svc(), usr()),
+            (svc(), ProfileDirSource::ServiceAuthority)
+        );
+    }
+
+    #[test]
+    fn profile_dir_service_installed_but_no_profile_for_this_network_uses_per_user() {
+        assert_eq!(
+            pick_profile_dir(None, true, false, svc(), usr()),
+            (usr(), ProfileDirSource::PerUser)
+        );
+    }
+
+    #[test]
+    fn profile_dir_no_service_uses_per_user_even_if_a_file_is_there() {
+        assert_eq!(
+            pick_profile_dir(None, false, true, svc(), usr()),
+            (usr(), ProfileDirSource::PerUser)
+        );
+    }
 
     #[test]
     fn engine_with_no_strategy_is_discovery() {

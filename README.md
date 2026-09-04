@@ -433,6 +433,16 @@ bosphorus service run            # SCM entry point only — not for interactive 
 | `%LOCALAPPDATA%\Bosphorus\profiles\*.json`   | Learned discovery profiles for an **interactive** `--engine` run — one per NetKey. |
 | `%ProgramData%\Bosphorus\profiles\*.json`    | Same, for the **service** (SYSTEM can't use `%LOCALAPPDATA%`). |
 | `%ProgramData%\Bosphorus\logs\`              | Rotating service log files.                            |
+
+**Store resolution.** `--profile-dir DIR`, when given, is used verbatim. Otherwise
+an interactive `--engine` uses the service's `%ProgramData%` store **if the
+service is installed and already has a profile for the current network**
+("service = authority"), so the two run modes share one per-network memory;
+failing that it uses the per-user `%LOCALAPPDATA%` store as before. The write is
+an atomic last-writer-wins replace with a per-process staging file — running the
+service and a long interactive `--engine` against the same store at once won't
+corrupt it, but they can overwrite each other's incremental learning (the
+profile is a cache, not a ledger).
 | Windows Application event log, provider `Bosphorus` | Service start / stop / open-failure / panic breadcrumbs. |
 
 Inspect a running instance:
@@ -917,6 +927,15 @@ bosphorus service run            # yalnızca SCM giriş noktası — etkileşiml
 | `%LOCALAPPDATA%\Bosphorus\profiles\*.json`   | **Etkileşimli** bir `--engine` çalışması için öğrenilen keşif profilleri — NetKey başına bir tane. |
 | `%ProgramData%\Bosphorus\profiles\*.json`    | Aynısı, **hizmet** için (SYSTEM `%LOCALAPPDATA%` kullanamaz). |
 | `%ProgramData%\Bosphorus\logs\`              | Döngüsel hizmet günlük dosyaları.                     |
+
+**Depo seçimi.** `--profile-dir DIR` verilirse aynen kullanılır. Aksi hâlde
+etkileşimli bir `--engine`, **hizmet kuruluysa ve mevcut ağ için zaten bir
+profili varsa** hizmetin `%ProgramData%` deposunu kullanır ("hizmet = otorite"),
+böylece iki çalışma modu tek bir ağ-bazlı hafızayı paylaşır; yoksa eskisi gibi
+kullanıcıya özel `%LOCALAPPDATA%` deposunu kullanır. Yazma, süreç başına bir
+hazırlık dosyası ile atomik son-yazan-kazanır değiştirmedir — hizmet ile uzun bir
+etkileşimli `--engine`'i aynı depoya aynı anda koşturmak dosyayı bozmaz ama
+birbirlerinin adımsal öğrenmesini ezebilirler (profil bir önbellek, defter değil).
 | Windows Application olay günlüğü, `Bosphorus` sağlayıcısı | Hizmet başlat / durdur / açma-hatası / panik kırıntıları. |
 
 Çalışan bir örneği inceleyin:

@@ -186,16 +186,10 @@ if ($doPhase1) {
     $hostList = if ($Hosts) { $Hosts } else { Harvest-MediaHosts }
 }
 
-# Interactive `--engine` reads %LOCALAPPDATA%\Bosphorus\profiles by default; the
-# service learns into %ProgramData%\Bosphorus\profiles. For the (b) probe-skip
-# check we want the service's populated store, so auto-point there when it holds
-# any profile (unless -ProfileDir was given, or -NoEngine).
-if (-not $ProfileDir -and -not $NoEngine) {
-    $pd = Join-Path $env:ProgramData 'Bosphorus\profiles'
-    if ((Test-Path $pd) -and @(Get-ChildItem $pd -Filter '*.json' -File -ErrorAction SilentlyContinue).Count) {
-        $ProfileDir = $pd
-    }
-}
+# `--engine` now resolves the store itself: when the service is installed and has
+# a profile for this network it reads/writes %ProgramData%\Bosphorus\profiles
+# ("service = authority"), else %LOCALAPPDATA%. -ProfileDir is only for forcing a
+# specific directory (it overrides that resolution).
 $engineArgs = @()
 if ($ProfileDir) { $engineArgs += @('--profile-dir', $ProfileDir) }
 
