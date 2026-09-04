@@ -267,14 +267,24 @@ function Ts([string]$line) {
     return $null
 }
 
-# per guided join: discord.media attempts + resets + span
+# per guided join: discord.media attempts + resets + span.
+# Window is anchored at the JOIN instant and kept shorter than the ~30 s
+# join+leave cadence so adjacent joins never double-count the same handshake.
 foreach ($jr in $joinRows) {
-    $lines = @($mediaClass | Where-Object { $t = Ts $_; $t -and $t -ge $jr.from -and $t -le $jr.to.AddSeconds(20) })
-    $reset = @($lines | Where-Object { $_ -match 'outcome=DpiReset|outcome=Blackhole|outcome=LateReset' }).Count
-    $ok    = @($lines | Where-Object { $_ -match 'outcome=Success' }).Count
-    $times = @($lines | ForEach-Object { Ts $_ } | Where-Object { $_ })
-    $span  = if ($times.Count -ge 2) { [math]::Round((($times | Measure-Object -Maximum).Maximum - ($times | Measure-Object -Minimum).Minimum).TotalSeconds, 1) } else { 0 }
-    $jr | Add-Member attempts $lines.Count; $jr | Add-Member reset $reset; $jr | Add-Member ok $ok; $jr | Add-Member spanS $span
+    $lo = $jr.from.AddSeconds(-2)
+    $hi = $jr.from.AddSeconds(26)
+    $win = @($mediaClass | Where-Object { $t = Ts $_; $t -and $t -ge $lo -and $t -lt $hi })
+    $ok = 0; $reset = 0
+    foreach ($ln in $win) {
+        if     ($ln -match 'outcome=Success')                    { $ok++ }
+        elseif ($ln -match 'outcome=(DpiReset|Blackhole|LateReset)') { $reset++ }
+    }
+    $times = @($win | ForEach-Object { Ts $_ } | Where-Object { $_ } | Sort-Object)
+    $span  = if ($times.Count -ge 2) { [math]::Round(($times[-1] - $times[0]).TotalSeconds, 1) } else { 0 }
+    $jr | Add-Member -NotePropertyName attempts -NotePropertyValue $win.Count -Force
+    $jr | Add-Member -NotePropertyName reset    -NotePropertyValue $reset     -Force
+    $jr | Add-Member -NotePropertyName ok       -NotePropertyValue $ok        -Force
+    $jr | Add-Member -NotePropertyName spanS    -NotePropertyValue $span      -Force
 }
 
 # --------------------------------------------------------------------------- #
