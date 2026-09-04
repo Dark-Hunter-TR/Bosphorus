@@ -233,7 +233,7 @@ function Ts([string]$line) {
 # per guided join: discord.media attempts + resets + span
 foreach ($jr in $joinRows) {
     $lines = @($mediaClass | Where-Object { $t = Ts $_; $t -and $t -ge $jr.from -and $t -le $jr.to.AddSeconds(20) })
-    $reset = @($lines | Where-Object { $_ -match 'outcome=DpiReset|outcome=Blackhole' }).Count
+    $reset = @($lines | Where-Object { $_ -match 'outcome=DpiReset|outcome=Blackhole|outcome=LateReset' }).Count
     $ok    = @($lines | Where-Object { $_ -match 'outcome=Success' }).Count
     $times = @($lines | ForEach-Object { Ts $_ } | Where-Object { $_ })
     $span  = if ($times.Count -ge 2) { [math]::Round((($times | Measure-Object -Maximum).Maximum - ($times | Measure-Object -Minimum).Minimum).TotalSeconds, 1) } else { 0 }
@@ -294,7 +294,7 @@ if ($joinRows.Count) {
     }
     $slow = @($joinRows | Where-Object { $_.spanS -ge 3 -or $_.reset -gt 0 }).Count
     $S.Add("  slow / reset-hit joins: $slow / $($joinRows.Count)")
-    $S.Add('  (fast join = 1 attempt, ok, <1s span. slow = >=2 attempts and/or a DpiReset.)')
+    $S.Add('  (fast join = 1 attempt, ok, <1s span. slow = >=2 attempts and/or a DpiReset / LateReset.)')
     foreach ($l in ($mediaClass | Select-Object -Last 12)) { $S.Add("    $l") }
     $S.Add('')
 }
