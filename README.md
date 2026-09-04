@@ -165,6 +165,11 @@ and never becomes a target.
 - **Retransmit-aware.** Once a strategy has been emitted for a flow, a later
   `ClientHello` on that same flow is a retransmit and is forwarded untouched — no
   amplification.
+- **Transient failures are forgiven once.** A `DpiReset` (a deliberate middlebox
+  reset) rules a candidate out immediately, but a `Blackhole` — which can be
+  momentary packet loss — is retried once before the candidate is parked. A
+  trial-count ceiling (`grid size × 2`) still forces the sweep to `Exhausted`
+  even if forgiven candidates would otherwise keep it going.
 - **Grid revival.** A target that exhausted, say, a 154-strategy grid and is
   later loaded under a 166-strategy grid re-enters `Discover` and tries only the
   new candidates — the old `tried` list is preserved.
@@ -641,6 +646,11 @@ değiştirilmez ve asla hedef olmaz.
 - **Yeniden iletim farkındalığı.** Bir akış için strateji üretildikten sonra, o
   akıştaki sonraki `ClientHello` bir yeniden iletimdir ve dokunulmadan iletilir —
   yükseltme (amplification) olmaz.
+- **Geçici başarısızlıklar bir kez affedilir.** `DpiReset` (kasıtlı ara-kutu
+  sıfırlaması) adayı hemen eler, ama anlık paket kaybı olabilen `Blackhole`, aday
+  park edilmeden önce bir kez daha denenir. Bir deneme-sayısı tavanı
+  (`grid boyutu × 2`) yine de, affedilen adaylar taramayı sürdürse bile
+  `Exhausted`'a ulaşmayı garanti eder.
 - **Grid canlanması.** Örneğin 154 stratejilik bir gridi tüketen ve sonradan 166
   stratejilik bir gridle yüklenen bir hedef, yeniden `Discover`'a girer ve
   yalnızca yeni adayları dener — eski `tried` listesi korunur.

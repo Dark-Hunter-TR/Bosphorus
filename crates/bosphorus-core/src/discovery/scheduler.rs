@@ -65,6 +65,18 @@ pub struct Scheduler {
     pub tuning: DiscoveryTuning,
 }
 
+/// Upper bound on `Explore` verdicts before a `Discover` sweep is declared
+/// exhausted, even while some candidates still look retryable. Each grid
+/// candidate can be handed out at most `1 + suspect_retries` times (a transient
+/// `Blackhole` is forgiven that many times before its own failure count parks
+/// it), so once that many verdicts have come back the sweep has run its course.
+/// Guards against a livelock where forgiven candidates keep `tried` short.
+fn sweep_budget_spent(ts: &TargetState, gen: &DefaultGenerator, tuning: &DiscoveryTuning) -> bool {
+    let trials: u32 = ts.scores.values().map(|s| s.trials).sum();
+    let budget = (gen.len() as u32).saturating_mul(1 + tuning.suspect_retries as u32);
+    trials >= budget
+}
+
 /// Pick the first seed that is a live grid strategy, not already ruled
 /// out / in-flight, and allowed by `accept`.
 fn pick_seed(
@@ -182,10 +194,12 @@ impl Scheduler {
                         },
                         None => {
                             // Nothing to hand out. Either every candidate is
-                            // truly ruled out (-> Exhausted), or the rest are
-                            // just in-flight on sibling connections
-                            // (-> passthrough this one, stay in Discover).
-                            if gen.next_candidate(&ts.tried, &accept).is_none() {
+                            // ruled out / its trial budget is spent
+                            // (-> Exhausted), or the rest are just in-flight on
+                            // sibling connections (-> passthrough, stay Discover).
+                            if gen.next_candidate(&ts.tried, &accept).is_none()
+                                || sweep_budget_spent(ts, gen, &self.tuning)
+                            {
                                 ts.phase = NetPhase::Exhausted;
                                 ts.grid_size_at_exhaustion = Some(gen.len());
                                 let tried = ts.tried.len();
@@ -344,13 +358,20 @@ impl Scheduler {
                 } else {
                     // `note(ok = false)` already reset this candidate's streak.
                     if let Some(sid) = id {
-                        if !ts.tried.contains(&sid) {
+                        // A `DpiReset` / build error is a deliberate, repeatable
+                        // signal — park the candidate now. A `Blackhole` may be
+                        // momentary loss; forgive it `suspect_retries` times
+                        // (its own failure count then crosses the line).
+                        let park = !matches!(outcome, FlowOutcome::Blackhole)
+                            || ts.scores.get(&sid).map(|s| s.failures()).unwrap_or(0)
+                                > self.tuning.suspect_retries as u32;
+                        if park && !ts.tried.contains(&sid) {
                             ts.tried.push(sid);
                         }
                     }
-                    if gen
-                        .next_candidate(&ts.tried, &accept_for(ts.server_initial_ttl))
-                        .is_none()
+                    let accept = accept_for(ts.server_initial_ttl);
+                    if gen.next_candidate(&ts.tried, &accept).is_none()
+                        || sweep_budget_spent(ts, gen, &self.tuning)
                     {
                         ts.phase = NetPhase::Exhausted;
                         ts.grid_size_at_exhaustion = Some(gen.len());
@@ -521,7 +542,9 @@ mod tests {
             DiscoveryEvent::NextCandidate { .. }
         ));
         let a1 = s.assign(&mut ts, &g, now());
-        let ev = s.record(&mut ts, &g, a1.id, FlowOutcome::Blackhole, now());
+        // Both fail with a deliberate reset -> each parks on the first failure.
+        // (The `Blackhole` one-retry path has its own tests below.)
+        let ev = s.record(&mut ts, &g, a1.id, FlowOutcome::DpiReset, now());
         assert_eq!(ev, DiscoveryEvent::Exhausted { tried: 2 });
         assert_eq!(ts.phase, NetPhase::Exhausted);
 
@@ -896,5 +919,80 @@ mod tests {
             "got {ev:?}"
         );
         assert_eq!(ts.active, Some(seed));
+    }
+
+    // ---- Phase 2 (2C): one-retry on a transient Blackhole -------------------
+
+    #[test]
+    fn a_single_blackhole_keeps_the_candidate_in_play_a_second_parks_it() {
+        let s = sched(); // suspect_retries = 1
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        s.assign(&mut ts, &g, t);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t); // Probe -> Discover
+
+        let id = s.assign(&mut ts, &g, t).id.unwrap();
+
+        // First Blackhole: forgiven — not ruled out, and the sweep re-offers it.
+        assert!(matches!(
+            s.record(&mut ts, &g, Some(id), FlowOutcome::Blackhole, t),
+            DiscoveryEvent::NextCandidate { .. }
+        ));
+        assert!(!ts.tried.contains(&id), "one Blackhole does not rule the candidate out");
+        assert_eq!(s.assign(&mut ts, &g, t).id, Some(id), "the sweep re-offers it");
+
+        // Second Blackhole: now parked.
+        s.record(&mut ts, &g, Some(id), FlowOutcome::Blackhole, t);
+        assert!(ts.tried.contains(&id), "a second Blackhole rules it out");
+    }
+
+    #[test]
+    fn dpi_reset_and_tls_error_still_park_a_candidate_on_the_first_failure() {
+        let s = sched();
+        let g = tiny_gen_n(&[2, 3, 4]);
+        let t = now();
+
+        for outcome in [FlowOutcome::DpiReset, FlowOutcome::TlsError] {
+            let mut ts = TargetState::new("t".into(), t);
+            s.assign(&mut ts, &g, t);
+            s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t);
+            let id = s.assign(&mut ts, &g, t).id.unwrap();
+            s.record(&mut ts, &g, Some(id), outcome, t);
+            assert!(
+                ts.tried.contains(&id),
+                "{outcome:?} rules the candidate out on the first failure (only Blackhole is forgiven)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_trial_budget_forces_exhaustion_even_while_candidates_look_retryable() {
+        let s = sched(); // suspect_retries = 1 -> budget = 3 * 2 = 6 verdicts
+        let g = tiny_gen_n(&[2, 3, 4]);
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        s.assign(&mut ts, &g, t);
+        s.record(&mut ts, &g, None, FlowOutcome::DpiReset, t); // -> Discover
+
+        let ids: Vec<StrategyId> = g.all().iter().map(|x| x.id()).collect();
+
+        // Park candidates 0 and 1 with two Blackholes each (4 verdicts).
+        for id in &ids[..2] {
+            s.record(&mut ts, &g, Some(*id), FlowOutcome::Blackhole, t);
+            s.record(&mut ts, &g, Some(*id), FlowOutcome::Blackhole, t);
+        }
+        // Candidate 2: one Blackhole -> still a live Suspect (not in `tried`).
+        let ev = s.record(&mut ts, &g, Some(ids[2]), FlowOutcome::Blackhole, t);
+        assert!(matches!(ev, DiscoveryEvent::NextCandidate { .. }));
+        assert!(!ts.tried.contains(&ids[2]));
+        assert_eq!(ts.phase, NetPhase::Discover);
+
+        // One more late verdict for the already-parked candidate 0 takes the
+        // total to the budget (6). Candidate 2 still looks retryable, but the
+        // sweep must terminate rather than loop on it forever.
+        let ev = s.record(&mut ts, &g, Some(ids[0]), FlowOutcome::Blackhole, t);
+        assert!(matches!(ev, DiscoveryEvent::Exhausted { .. }), "got {ev:?}");
+        assert_eq!(ts.phase, NetPhase::Exhausted, "trial budget spent -> Exhausted");
     }
 }

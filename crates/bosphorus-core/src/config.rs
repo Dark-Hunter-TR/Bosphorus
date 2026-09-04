@@ -173,6 +173,12 @@ pub struct DiscoveryTuning {
     /// Consecutive failures of the active strategy before it is demoted and
     /// discovery restarts for that target.
     pub demote_after_failure: u8,
+    /// How many times a `Discover` candidate may hit a **transient** failure
+    /// ([`Blackhole`](crate::conntrack::FlowOutcome::Blackhole) — momentary loss,
+    /// congestion) before it is ruled out for the sweep. `0` restores the old
+    /// "one failure of any kind parks it" behaviour. A `DpiReset` / build error
+    /// still parks the candidate on the first occurrence regardless of this.
+    pub suspect_retries: u8,
     /// An `Explore` trial that was handed out but never resolved stops blocking
     /// its candidate after this long, so a lost or idle-swept flow cannot
     /// permanently shrink the sweep. Must comfortably exceed
@@ -198,6 +204,7 @@ impl Default for DiscoveryTuning {
         Self {
             promote_after_success: 2,
             demote_after_failure: 3,
+            suspect_retries: 1,
             in_flight_ttl: Duration::from_secs(15),
             target_idle_evict: Duration::from_secs(24 * 3600),
             target_max_idle: Duration::from_secs(7 * 24 * 3600),
