@@ -252,7 +252,7 @@ impl Engine {
             if meta.outbound {
                 conntrack::observe_outbound(st, &view, now, &self.cfg.conntrack)
             } else {
-                conntrack::observe_inbound(st, &view, now)
+                conntrack::observe_inbound(st, &view, now, &self.cfg.conntrack)
             }
         });
         if let Some(outcome) = verdict {
@@ -919,6 +919,11 @@ mod tests {
     fn inbound_serverhello(sport: u16) -> Vec<u8> {
         inbound_tcp(sport, 0x18, &[0x16, 0x03, 0x03, 0x00, 0x05, 0x02])
     }
+    /// Real inbound application data — confirms a handshake `Success` without
+    /// waiting out the `app_grace` window.
+    fn inbound_appdata(sport: u16) -> Vec<u8> {
+        inbound_tcp(sport, 0x18, &[0x17, 0x03, 0x03, 0x00, 0x03, 0xaa, 0xbb, 0xcc])
+    }
 
     #[test]
     fn non_ip_packets_pass_through_unchanged() {
@@ -1016,7 +1021,9 @@ mod tests {
         engine.process(&mut inbound_rst(41000), &mut in_meta(), &mut SendBatch::new());
         assert_eq!(engine.discovery_summary()[0].phase, NetPhase::Discover);
 
-        // Two fresh connections, each: candidate applied, then ServerHello -> Success.
+        // Two fresh connections, each: candidate applied, then ServerHello +
+        // real app data -> Success (the grace window is short-circuited by the
+        // inbound `0x17`).
         for (i, port) in [41001u16, 41002].into_iter().enumerate() {
             let mut c = ch_with_sni("blocked.example", port);
             let mut o = SendBatch::new();
@@ -1026,6 +1033,7 @@ mod tests {
                 "iteration {i}"
             );
             engine.process(&mut inbound_serverhello(port), &mut in_meta(), &mut SendBatch::new());
+            engine.process(&mut inbound_appdata(port), &mut in_meta(), &mut SendBatch::new());
         }
 
         let s = engine.discovery_summary();

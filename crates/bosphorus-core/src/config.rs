@@ -141,6 +141,14 @@ pub struct ConntrackTuning {
     /// After a ClientHello, wait this long for a verdict before calling it
     /// [`Blackhole`](crate::conntrack::FlowOutcome::Blackhole).
     pub verdict_timeout: Duration,
+    /// After a `ServerHello`, wait this long with no teardown (RST / fatal TLS
+    /// alert) before the handshake is confirmed a
+    /// [`Success`](crate::conntrack::FlowOutcome::Success). Catches a DPI that
+    /// lets the `ServerHello` through and then resets the flow a beat later
+    /// ([`LateReset`](crate::conntrack::FlowOutcome::LateReset)). Real inbound
+    /// application data short-circuits the wait. Must stay `< verdict_timeout`
+    /// so the `Blackhole` timer never races it.
+    pub app_grace: Duration,
     /// This many ClientHello retransmits (no response) => `Blackhole`.
     pub client_hello_retx_fail: u8,
 }
@@ -150,6 +158,7 @@ impl Default for ConntrackTuning {
         Self {
             idle_timeout: Duration::from_secs(60),
             verdict_timeout: Duration::from_secs(5),
+            app_grace: Duration::from_secs(1),
             client_hello_retx_fail: 3,
         }
     }

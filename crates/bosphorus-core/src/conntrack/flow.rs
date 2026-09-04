@@ -57,6 +57,10 @@ pub struct FlowState {
     pub client_hello_retx: u8,
 
     pub server_hello_seen: bool,
+    /// When the first server `0x16` record was seen — starts the `app_grace`
+    /// window after which the handshake is confirmed a `Success` (unless a RST /
+    /// fatal alert tears it down first, giving `LateReset`).
+    pub server_hello_at: Option<Instant>,
     pub inbound_rst: bool,
 
     pub bytes_out: u64,
@@ -89,6 +93,7 @@ impl FlowState {
             client_hello_seq: None,
             client_hello_retx: 0,
             server_hello_seen: false,
+            server_hello_at: None,
             inbound_rst: false,
             bytes_out: 0,
             bytes_in: 0,

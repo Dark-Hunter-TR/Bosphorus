@@ -115,14 +115,19 @@ the outcome becomes certain the flow is classified:
 
 | Verdict        | Meaning                                                            |
 |----------------|-------------------------------------------------------------------|
-| `Success`      | The server sent a TLS handshake / data — the connection worked.  |
-| `DpiReset`     | A `RST` came from `:443` after our `ClientHello`, before any server data — the classic in-path reset. |
+| `Success`      | The handshake got through **and held** — either real inbound application data flowed, or a short grace window elapsed after the `ServerHello` with no teardown. |
+| `DpiReset`     | A `RST` came from the server after our `ClientHello`, before any `ServerHello` — the classic in-path reset. |
+| `LateReset`    | The `ServerHello` got through, then a `RST` / fatal TLS alert tore the flow down inside the grace window — a "delayed reset" DPI. Scored as a failure. |
 | `Blackhole`    | `ClientHello` sent, nothing came back (retransmits, then timeout). |
 | `TlsError`     | A failure during setup that is not a clean DPI reset.            |
 | `Inconclusive` | The flow aged out before anything decisive happened.            |
 
-Verdicts that need a timer (blackhole, aged-out flows) are resolved on a ~2 Hz
-maintenance tick, then fed back to discovery just like live ones.
+`Success` is deferred by a ~1 s grace window (`ConntrackTuning::app_grace`, always
+shorter than the blackhole timeout) so a censor that passes the `ServerHello` and
+then resets the flow is caught as `LateReset` rather than banked as a success.
+Real inbound application data short-circuits the wait. Verdicts that need a timer
+(the grace window, blackhole, aged-out flows) are resolved on a ~2 Hz maintenance
+tick, then fed back to discovery just like live ones.
 
 ### The discovery lifecycle
 
@@ -586,14 +591,20 @@ makinesini günceller. Sonuç kesinleştiğinde akış sınıflandırılır:
 
 | Karar          | Anlamı                                                                |
 |----------------|---------------------------------------------------------------------|
-| `Success`      | Sunucu bir TLS handshake / veri gönderdi — bağlantı çalıştı.       |
-| `DpiReset`     | `ClientHello`'muzdan sonra, sunucudan herhangi bir veri gelmeden `:443`'ten bir `RST` geldi — klasik yol-içi sıfırlama. |
+| `Success`      | Handshake geçti **ve tuttu** — ya gerçek gelen uygulama verisi aktı, ya da `ServerHello` sonrası kısa bir bekleme penceresi teardown olmadan doldu. |
+| `DpiReset`     | `ClientHello`'muzdan sonra, herhangi bir `ServerHello` gelmeden sunucudan bir `RST` geldi — klasik yol-içi sıfırlama. |
+| `LateReset`    | `ServerHello` geçti, ardından bekleme penceresi içinde bir `RST` / ölümcül TLS alert bağlantıyı kopardı — "gecikmeli sıfırlama" DPI'ı. Başarısızlık sayılır. |
 | `Blackhole`    | `ClientHello` gönderildi, hiçbir yanıt gelmedi (yeniden iletimler, ardından zaman aşımı). |
 | `TlsError`     | Kurulum sırasında temiz bir DPI sıfırlaması olmayan bir hata.       |
 | `Inconclusive` | Belirleyici bir şey olmadan akış zaman aşımına uğradı.             |
 
-Zamanlayıcı gerektiren kararlar (karadelik, zaman aşımına uğrayan akışlar) ~2 Hz'lik
-bir bakım tik'inde çözülür ve canlı kararlar gibi keşfe geri beslenir.
+`Success` ~1 sn'lik bir bekleme penceresiyle (`ConntrackTuning::app_grace`, her
+zaman karadelik zaman aşımından kısa) ertelenir; böylece `ServerHello`'yu geçirip
+sonra bağlantıyı sıfırlayan bir sansür, başarı olarak kaydedilmek yerine
+`LateReset` olarak yakalanır. Gerçek gelen uygulama verisi beklemeyi kısa keser.
+Zamanlayıcı gerektiren kararlar (bekleme penceresi, karadelik, zaman aşımına
+uğrayan akışlar) ~2 Hz'lik bir bakım tik'inde çözülür ve canlı kararlar gibi
+keşfe geri beslenir.
 
 ### Keşif yaşam döngüsü
 

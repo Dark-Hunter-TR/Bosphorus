@@ -11,7 +11,10 @@ pub fn is_success(o: FlowOutcome) -> bool {
 pub fn is_failure(o: FlowOutcome) -> bool {
     matches!(
         o,
-        FlowOutcome::DpiReset | FlowOutcome::Blackhole | FlowOutcome::TlsError
+        FlowOutcome::DpiReset
+            | FlowOutcome::LateReset
+            | FlowOutcome::Blackhole
+            | FlowOutcome::TlsError
     )
 }
 
@@ -31,7 +34,12 @@ mod tests {
     #[test]
     fn mapping() {
         assert!(is_success(FlowOutcome::Success));
-        for o in [FlowOutcome::DpiReset, FlowOutcome::Blackhole, FlowOutcome::TlsError] {
+        for o in [
+            FlowOutcome::DpiReset,
+            FlowOutcome::LateReset,
+            FlowOutcome::Blackhole,
+            FlowOutcome::TlsError,
+        ] {
             assert!(is_failure(o));
             assert_eq!(score_delta(o), -1);
         }
