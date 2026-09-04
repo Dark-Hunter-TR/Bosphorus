@@ -75,7 +75,7 @@ function Resolve-Exe {
     Fail "bosphorus.exe not found - cargo build --release"
 }
 function D([string]$s) { $v = 0.0; [void][double]::TryParse($s, [Globalization.NumberStyles]::Float, $inv, [ref]$v); $v }
-function Strip-Ansi([string]$s) { [regex]::Replace($s, "\[[0-9;]*m", "") }
+function Strip-Ansi([string]$s) { [regex]::Replace($s, "\x1b?\[[0-9;]*m", "") }
 
 function Stats([double[]]$v) {
     $g = @($v | Where-Object { $_ -gt 0 } | Sort-Object)
@@ -291,12 +291,9 @@ function Ts([string]$line) {
 foreach ($jr in $joinRows) {
     $lo = $jr.from.AddSeconds(-2)
     $hi = $jr.from.AddSeconds(26)
-    $win = @($mediaClass | Where-Object { $t = Ts $_; $t -and $t -ge $lo -and $t -lt $hi })
-    $ok = 0; $reset = 0
-    foreach ($ln in $win) {
-        if     ($ln -match 'outcome=Success')                    { $ok++ }
-        elseif ($ln -match 'outcome=(DpiReset|Blackhole|LateReset)') { $reset++ }
-    }
+    $win = @($mediaClass | Where-Object { $t = Ts $_; $t -and $t -ge $lo -and $t -lt $hi } | ForEach-Object { "$_" })
+    $ok    = @($win | Where-Object { $_.Contains('outcome=Success') }).Count
+    $reset = @($win | Where-Object { $_ -match 'outcome=(DpiReset|Blackhole|LateReset)' }).Count
     $times = @($win | ForEach-Object { Ts $_ } | Where-Object { $_ } | Sort-Object)
     $span  = if ($times.Count -ge 2) { [math]::Round(($times[-1] - $times[0]).TotalSeconds, 1) } else { 0 }
     $jr | Add-Member -NotePropertyName attempts -NotePropertyValue $win.Count -Force
