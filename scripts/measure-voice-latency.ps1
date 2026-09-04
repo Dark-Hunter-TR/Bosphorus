@@ -89,7 +89,7 @@ function Stats([double[]]$v) {
 # mid-handshake; + exit 28 = the connection stalled before TLS finished.
 function Handshake([string]$hostname, [int]$port) {
     $url = "https://{0}:{1}/" -f $hostname, $port
-    $line = & curl.exe -sk -4 -o NUL --connect-timeout 8 --max-time 10 `
+    $line = & curl.exe -sk -4 -o NUL --connect-timeout 5 --max-time 8 `
         -w '%{time_appconnect} %{http_code}' $url 2>$null
     $ce = $LASTEXITCODE
     $p = ($line.Trim() -split '\s+')
@@ -122,9 +122,26 @@ function Harvest-MediaHosts {
     @($set.Keys) | Select-Object -First 4
 }
 
+# Drop harvested hosts that no longer resolve / connect (RTC hosts are
+# per-session ephemeral, so a name from an old log usually times out). One fast
+# probe on :443; keep the host if TCP+TLS got anywhere at all (exit 0/35/52/56),
+# drop it on could-not-resolve / could-not-connect / timeout (6/7/28).
+function Filter-LiveHosts([string[]]$hosts) {
+    $live = @()
+    foreach ($h in $hosts) {
+        if ($h -eq 'latency.discord.media') { $live += $h; continue }  # stable name
+        & curl.exe -sk -4 -o NUL --connect-timeout 3 --max-time 4 "https://$h/" 2>$null | Out-Null
+        if ($LASTEXITCODE -notin 6, 7, 28) { $live += $h }
+        else { Write-Host "  (dropping stale host $h : curl exit $LASTEXITCODE)" -ForegroundColor DarkGray }
+    }
+    if ($live.Count -eq 0) { $live = @('latency.discord.media') }
+    $live
+}
+
 # battery: every (host,port) x $Iters -> per-cell rows appended to $acc
 function Run-Battery([string]$mode, [hashtable]$acc) {
     foreach ($h in $hostList) {
+        Write-Host ("    {0,-8} {1} " -f $mode, $h) -NoNewline -ForegroundColor DarkGray
         foreach ($pt in $Ports) {
             $key = "$mode|$h|$pt"
             if (-not $acc.ContainsKey($key)) { $acc[$key] = [pscustomobject]@{ ms = @(); ok = 0; reset = 0; timeout = 0; other = 0; codes = @{} } }
@@ -140,7 +157,9 @@ function Run-Battery([string]$mode, [hashtable]$acc) {
                 $c.codes["$($r.exit)"] = 1 + [int]$c.codes["$($r.exit)"]
                 Start-Sleep -Milliseconds 120
             }
+            Write-Host '.' -NoNewline -ForegroundColor DarkGray
         }
+        Write-Host ''
     }
 }
 
@@ -153,14 +172,27 @@ $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $outDir = Join-Path $repoRoot "measure-out\vlat-$stamp"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-$hostList = if ($Hosts) { $Hosts } else { Harvest-MediaHosts }
+# Phase 1 (the curl battery) only runs when it was actually asked for: no
+# -GuidedJoins, or -Repeat given explicitly alongside it. -GuidedJoins on its
+# own goes straight to the guided join/leave loop (the (b) probe-skip check).
+$doPhase1 = ($GuidedJoins -le 0) -or $PSBoundParameters.ContainsKey('Repeat')
+
+$hostList = @()
+if ($doPhase1) {
+    $hostList = if ($Hosts) { $Hosts } else { Harvest-MediaHosts }
+}
+
+$phaseDesc = @()
+if ($doPhase1)          { $phaseDesc += "1 (battery x $Repeat)" }
+if ($GuidedJoins -gt 0) { $phaseDesc += "2 (guided joins: $GuidedJoins)" }
 
 Write-Host ""
 Write-Host "voice-signalling latency / DPI-reset probe" -ForegroundColor Cyan
 Write-Host "  exe    : $(if ($exe) { $exe } else { '(baseline only, -NoEngine)' })"
-Write-Host "  hosts  : $($hostList -join ', ')"
+Write-Host "  phase  : $($phaseDesc -join ' + ')"
+if ($doPhase1) { Write-Host "  hosts  : $($hostList -join ', ')" }
 Write-Host "  ports  : $($Ports -join ', ')"
-Write-Host "  iters  : $Iters  x repeat $Repeat   guided joins: $GuidedJoins"
+Write-Host "  iters  : $Iters"
 Write-Host "  output : $outDir`n"
 
 $svc = Get-Service -Name Bosphorus -ErrorAction SilentlyContinue
@@ -173,7 +205,12 @@ if ($svc -and $svc.Status -eq 'Running') {
 
 $acc = @{}
 
-for ($rep = 1; $rep -le $Repeat; $rep++) {
+if ($doPhase1 -and -not $Hosts) {
+    $hostList = Filter-LiveHosts $hostList
+    Write-Host "  live hosts: $($hostList -join ', ')`n" -ForegroundColor DarkCyan
+}
+
+for ($rep = 1; ($rep -le $Repeat) -and $doPhase1; $rep++) {
     Write-Host "[repeat $rep/$Repeat]" -ForegroundColor Green
 
     if (-not $NoBaseline) {
@@ -246,6 +283,7 @@ $S.Add('================ MEASURE-VOICE-LATENCY SUMMARY (paste this whole block) 
 $S.Add("timestamp : $stamp   iters=$Iters repeat=$Repeat  hosts=[$($hostList -join ',')]")
 if ($script:svcWasRunning) { $S.Add('note: Bosphorus service was stopped for the run and restarted after.') }
 $S.Add('')
+if ($doPhase1) {
 $S.Add('--- PHASE 1: TLS handshake to *.discord.media per port (DPI-reset probe) ---')
 $S.Add(("  {0,-26} {1,5} {2,-9} {3,5} {4,6} {5,6} {6,7} {7,7} {8,7}" -f 'host', 'port', 'mode', 'n', 'ok', 'reset', 'timeout', 'md.ms', 'p90.ms'))
 $S.Add('  ' + ('-' * 92))
@@ -286,6 +324,7 @@ if ($bPct -ge 5 -and $ePct -lt $bPct / 2) {
     $S.Add('  => mixed / inconclusive - see the per-port table above.')
 }
 $S.Add('')
+} # end if ($doPhase1)
 if ($joinRows.Count) {
     $S.Add('--- PHASE 2: guided voice joins (per-join *.discord.media signalling) ---')
     $S.Add(("  {0,4} {1,9} {2,7} {3,6} {4,8}" -f 'join', 'attempts', 'reset', 'ok', 'span(s)'))
