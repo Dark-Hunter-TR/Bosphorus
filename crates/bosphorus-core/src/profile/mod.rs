@@ -2,8 +2,10 @@
 //! keyed by network fingerprint.
 
 mod score;
+pub mod isp;
 pub mod persist;
 
+pub use isp::IspPool;
 pub use score::{ScoredStrategy, StrategyQuality};
 
 use std::collections::HashMap;
@@ -72,6 +74,10 @@ pub enum SeedTier {
     /// wired — it needs the server IP plumbed into `assign` — so nothing
     /// constructs this variant today.
     IpProximity,
+    /// A strategy that other **networks of the same ISP** (manual `--isp`
+    /// label) settled on. A cross-network prior, not same-network proof —
+    /// weaker than everything above it, so it only reorders the grid sweep.
+    IspPool,
 }
 
 impl SeedTier {
@@ -80,19 +86,21 @@ impl SeedTier {
     ///
     /// `DomainSibling` / `HouseStrategy` promote on the **first** success: the
     /// strategy is already proven on the same network, and a wrong seed
-    /// self-corrects via `demote_after_failure`. `IpProximity` is weaker, so it
-    /// keeps the default threshold.
+    /// self-corrects via `demote_after_failure`. `IpProximity` / `IspPool` are
+    /// weaker (a locality guess / a cross-network prior), so they keep the
+    /// default threshold.
     pub fn promote_threshold(self, default: u8) -> u8 {
         match self {
             SeedTier::DomainSibling | SeedTier::HouseStrategy => 1,
-            SeedTier::IpProximity => default,
+            SeedTier::IpProximity | SeedTier::IspPool => default,
         }
     }
 
     /// Tiers confident enough to skip the naked `Probe` on a fresh target: the
     /// strategy is already proven on the same network, so the odds this host is
     /// blocked the same way are very high. `IpProximity` is only a locality
-    /// guess, so it still earns its Probe.
+    /// guess and `IspPool` only a cross-network prior, so they still earn their
+    /// Probe.
     pub fn is_high_confidence(self) -> bool {
         matches!(self, SeedTier::DomainSibling | SeedTier::HouseStrategy)
     }

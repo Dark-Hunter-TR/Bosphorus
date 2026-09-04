@@ -54,6 +54,23 @@ impl StrategyQuality {
     pub fn looks_fast(&self) -> bool {
         self.retx_free_successes >= 2 && self.slow_successes == 0
     }
+
+    /// Fold `other`'s samples in — used to aggregate one strategy's quality
+    /// across the networks that feed the ISP seed pool. Counters sum; latency
+    /// fields take the better (lower) of the two. EWMA is not associative across
+    /// merges, so `latency_ewma` is only kept for rough tie-breaking here.
+    pub fn merge(&mut self, other: &Self) {
+        self.retx_free_successes = self.retx_free_successes.saturating_add(other.retx_free_successes);
+        self.slow_successes = self.slow_successes.saturating_add(other.slow_successes);
+        self.min_latency = match (self.min_latency, other.min_latency) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.latency_ewma = match (self.latency_ewma, other.latency_ewma) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
 }
 
 /// Trial/success bookkeeping for one strategy against one target.

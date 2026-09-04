@@ -69,7 +69,7 @@ impl ProfileFile {
     }
 }
 
-fn sanitize(net_key: &str) -> String {
+pub(crate) fn sanitize(net_key: &str) -> String {
     net_key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
@@ -78,6 +78,28 @@ fn sanitize(net_key: &str) -> String {
 
 pub fn profile_path(dir: &Path, net_key: &str) -> PathBuf {
     dir.join(format!("{}.json", sanitize(net_key)))
+}
+
+/// Write `bytes` to `path` atomically: a per-process staging file
+/// (`<path>.<pid>.tmp`) then a last-writer-wins rename. Two processes sharing one
+/// store never touch the same temp; the target is never left torn. Shared by the
+/// discovery profile and the ISP seed pool.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with_tag(path, bytes, &std::process::id().to_string())
+}
+
+fn atomic_write_with_tag(path: &Path, bytes: &[u8], tag: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("json");
+    let tmp = path.with_extension(format!("{ext}.{tag}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp); // don't leak our staging file on a lost race
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Read `<dir>/<net_key>.json`. `None` if it does not exist or cannot be
@@ -90,38 +112,17 @@ pub fn load(dir: &Path, net_key: &str) -> Option<ProfileFile> {
     }
 }
 
-/// Atomic write: temp file then rename. Returns the number of JSON bytes
-/// written (fed to the `bosphorus::mem` digest as a proxy for discovery-state
-/// size).
-///
-/// The staging file is named per-process (`<net_key>.json.<pid>.tmp`) so two
-/// processes pointed at the same store — the service and an interactive
-/// `--engine` sharing `%ProgramData%` — never write the same temp. The final
-/// rename is a last-writer-wins atomic replace: the file is never torn, but one
-/// process's incremental learning can overwrite the other's. The profile is a
-/// cache, not a ledger — the next session re-learns — so this is acceptable;
-/// callers just should not run both against one store for long stretches.
+/// Atomic write (see [`atomic_write`]): a per-process staging file then a
+/// last-writer-wins rename. Two processes pointed at the same store — the
+/// service and an interactive `--engine` sharing `%ProgramData%` — never write
+/// the same temp and never leave the target torn, but one can overwrite the
+/// other's incremental learning. The profile is a cache, not a ledger — the next
+/// session re-learns — so this is acceptable; callers just should not run both
+/// against one store for long stretches. Returns the JSON byte count.
 pub fn save(dir: &Path, net_key: &str, file: &ProfileFile) -> io::Result<usize> {
-    save_with_tmp_tag(dir, net_key, file, &std::process::id().to_string())
-}
-
-fn save_with_tmp_tag(
-    dir: &Path,
-    net_key: &str,
-    file: &ProfileFile,
-    tmp_tag: &str,
-) -> io::Result<usize> {
-    std::fs::create_dir_all(dir)?;
-    let path = profile_path(dir, net_key);
-    let tmp = path.with_extension(format!("json.{tmp_tag}.tmp"));
     let json = serde_json::to_vec_pretty(file).map_err(io::Error::other)?;
-    let n = json.len();
-    std::fs::write(&tmp, &json)?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp); // don't leak our staging file on a lost race
-        return Err(e);
-    }
-    Ok(n)
+    atomic_write(&profile_path(dir, net_key), &json)?;
+    Ok(json.len())
 }
 
 #[cfg(test)]
@@ -200,10 +201,12 @@ mod tests {
         // as a valid store.
         let dir = tempfile::tempdir().unwrap();
         let key = "net";
-        let p1_tmp = profile_path(dir.path(), key).with_extension("json.p1.tmp");
+        let path = profile_path(dir.path(), key);
+        let p1_tmp = path.with_extension("json.p1.tmp");
         std::fs::write(&p1_tmp, b"P1-STAGED-BYTES").unwrap();
 
-        save_with_tmp_tag(dir.path(), key, &sample(), "p2").unwrap();
+        let json = serde_json::to_vec_pretty(&sample()).unwrap();
+        atomic_write_with_tag(&path, &json, "p2").unwrap();
 
         assert_eq!(std::fs::read(&p1_tmp).unwrap(), b"P1-STAGED-BYTES", "P1's temp was clobbered");
         assert!(load(dir.path(), key).is_some(), "P2's save produced a valid store");
@@ -215,13 +218,14 @@ mod tests {
     fn back_to_back_saves_to_one_store_leave_a_valid_file_last_writer_wins() {
         let dir = tempfile::tempdir().unwrap();
         let key = "net";
+        let path = profile_path(dir.path(), key);
         let mut a = sample();
         a.targets[0].key = "a.example".into();
         let mut b = sample();
         b.targets[0].key = "b.example".into();
 
-        save_with_tmp_tag(dir.path(), key, &a, "1111").unwrap();
-        save_with_tmp_tag(dir.path(), key, &b, "2222").unwrap();
+        atomic_write_with_tag(&path, &serde_json::to_vec_pretty(&a).unwrap(), "1111").unwrap();
+        atomic_write_with_tag(&path, &serde_json::to_vec_pretty(&b).unwrap(), "2222").unwrap();
 
         let back = load(dir.path(), key).unwrap();
         assert_eq!(back.targets.len(), 1);

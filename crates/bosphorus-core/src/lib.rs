@@ -24,7 +24,7 @@ pub use conntrack::{FlowKey, FlowOutcome};
 pub use discovery::{Discovery, DiscoveryEvent, TargetSummary};
 pub use engine::{Decision, Engine, NetKeyFn, RunStats, StopFlag};
 pub use error::CoreError;
-pub use profile::NetPhase;
+pub use profile::{IspPool, NetPhase};
 pub use source_sink::{
     CaptureMeta, Captured, ChecksumOp, ChecksumWhich, PacketSink, PacketSource, RawAddr, SendBatch,
     SendItem,

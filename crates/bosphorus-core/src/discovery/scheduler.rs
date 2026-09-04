@@ -802,6 +802,22 @@ mod tests {
     }
 
     #[test]
+    fn isp_pool_seed_is_not_confident_enough_to_skip_the_probe() {
+        let s = sched();
+        let g = tiny_gen();
+        let t = now();
+        let mut ts = TargetState::new("t".into(), t);
+        let a = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::IspPool)], t);
+        assert!(a.id.is_none() && a.event.is_none(), "cross-network prior earns its Probe");
+        assert_eq!(ts.phase, NetPhase::Probe);
+        // In Discover it IS offered, at the default threshold.
+        ts.phase = NetPhase::Discover;
+        let b = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::IspPool)], t);
+        assert_eq!(b.id, Some(id0(&g)));
+        assert_eq!(b.seed_tier, Some(SeedTier::IspPool));
+    }
+
+    #[test]
     fn a_probe_skip_seed_that_fails_falls_through_to_the_grid() {
         let s = sched();
         let g = tiny_gen(); // frag@2, frag@3

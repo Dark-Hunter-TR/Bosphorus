@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -142,6 +142,11 @@ pub struct Engine {
     /// Instant of the last *actual* rebind (`None` = never) — the
     /// `min_rebind_interval` anchor. The first rebind is never rate-limited.
     last_rebind_at: Mutex<Option<Instant>>,
+
+    /// Cross-network ISP seed pool (feature C). `None` unless the CLI passed
+    /// `--isp`. Held here so a live rebind can re-attach it to the new session's
+    /// `Discovery`.
+    isp_pool: OnceLock<Arc<crate::profile::IspPool>>,
 }
 
 impl Engine {
@@ -168,6 +173,7 @@ impl Engine {
             netkey_dirty: AtomicBool::new(false),
             netkey_changed_at: Mutex::new(now),
             last_rebind_at: Mutex::new(None),
+            isp_pool: OnceLock::new(),
         }
     }
 
@@ -197,6 +203,20 @@ impl Engine {
 
     pub fn config(&self) -> &EvasionConfig {
         &self.cfg
+    }
+
+    /// Attach the cross-network ISP seed pool (feature C, `--isp`). Write-once;
+    /// applied to the current session and re-applied to any session a later
+    /// rebind builds.
+    pub fn set_isp_pool(&self, pool: Arc<crate::profile::IspPool>) {
+        let _ = self.isp_pool.set(Arc::clone(&pool));
+        self.session.load().discovery.set_isp_pool(pool);
+    }
+
+    /// Run `f` against the current network session's `Discovery` (e.g. to read
+    /// `promoted_for_isp` at shutdown). Reflects the live session after a rebind.
+    pub fn with_discovery<R>(&self, f: impl FnOnce(&Discovery) -> R) -> R {
+        f(&self.session.load().discovery)
     }
     /// The profile the current network session persists to (`None` for `nonet`
     /// or a forced run). Reflects the live session, i.e. survives a rebind.
@@ -568,6 +588,10 @@ impl Engine {
 
         let session = build_session(&self.cfg, profile, Some(new_human.to_string()));
         let restored = session.discovery.target_count();
+        // The ISP pool is ISP-scoped, not network-scoped — carry it across.
+        if let Some(pool) = self.isp_pool.get() {
+            session.discovery.set_isp_pool(Arc::clone(pool));
+        }
 
         // 3. atomic swap, 4. drop stale conntrack, 5. persist the new state soon.
         self.session.store(Arc::new(session));

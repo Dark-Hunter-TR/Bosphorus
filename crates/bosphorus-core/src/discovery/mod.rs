@@ -11,6 +11,7 @@ pub use verdict::{is_failure, is_success, score_delta, VerdictTiming};
 pub use crate::profile::SeedTier;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -18,13 +19,16 @@ use parking_lot::Mutex;
 use crate::config::EvasionConfig;
 use crate::conntrack::FlowOutcome;
 use crate::profile::persist::{PersistedScore, PersistedTarget, ProfileFile};
-use crate::profile::{NetPhase, ScoredStrategy, StrategyQuality, TargetState};
+use crate::profile::{IspPool, NetPhase, ScoredStrategy, StrategyQuality, TargetState};
 use crate::strategy::{DefaultGenerator, StrategyId};
 
 pub struct Discovery {
     generator: DefaultGenerator,
     scheduler: Scheduler,
     targets: Mutex<HashMap<String, TargetState>>,
+    /// Cross-network ISP seed pool (feature C). `None` unless the CLI was given
+    /// `--isp <name>`. Write-once at startup; read (lock-free) on every `assign`.
+    isp_pool: OnceLock<Arc<IspPool>>,
 }
 
 impl Discovery {
@@ -33,6 +37,7 @@ impl Discovery {
             generator: DefaultGenerator::new(cfg),
             scheduler: Scheduler { tuning: cfg.discovery.clone() },
             targets: Mutex::new(HashMap::new()),
+            isp_pool: OnceLock::new(),
         }
     }
 
@@ -41,7 +46,33 @@ impl Discovery {
         generator: DefaultGenerator,
         tuning: crate::config::DiscoveryTuning,
     ) -> Self {
-        Self { generator, scheduler: Scheduler { tuning }, targets: Mutex::new(HashMap::new()) }
+        Self {
+            generator,
+            scheduler: Scheduler { tuning },
+            targets: Mutex::new(HashMap::new()),
+            isp_pool: OnceLock::new(),
+        }
+    }
+
+    /// Attach the cross-network ISP seed pool. Idempotent: a second call is a
+    /// no-op (the pool is write-once). Called at startup and, on a live rebind,
+    /// re-applied to the new session's `Discovery`.
+    pub fn set_isp_pool(&self, pool: Arc<IspPool>) {
+        let _ = self.isp_pool.set(pool);
+    }
+
+    /// `(promoted id, its score)` for every `Active`-with-strategy target — the
+    /// raw material the CLI folds into the ISP seed pool at shutdown.
+    pub fn promoted_for_isp(&self) -> Vec<(StrategyId, ScoredStrategy)> {
+        self.targets
+            .lock()
+            .values()
+            .filter(|ts| ts.phase == NetPhase::Active)
+            .filter_map(|ts| {
+                let id = ts.active?;
+                Some((id, ts.scores.get(&id)?.clone()))
+            })
+            .collect()
     }
 
     pub fn grid_len(&self) -> usize {
@@ -181,14 +212,23 @@ impl Discovery {
     /// A fresh `Discover` target is seeded from what already works on this
     /// network: the promoted strategy of an `Active` sibling under the same
     /// registered domain first, then the session's most common `active`
-    /// strategy. Seeds are tried before the grid sweep; a bad one costs a single
-    /// trial. With no `Active` targets to learn from the seed list is empty and
-    /// behaviour is identical to a plain grid sweep.
+    /// strategy, then — weakest — strategies other networks of this ISP settled
+    /// on ([`SeedTier::IspPool`], only present with `--isp`). Seeds are tried
+    /// before the grid sweep; a bad one costs a single trial. With nothing to
+    /// learn from the seed list is empty and behaviour is identical to a plain
+    /// grid sweep.
     pub fn assign(&self, target: &str, server_initial_ttl: Option<u8>) -> Assignment {
         let now = Instant::now();
         let mut map = self.targets.lock();
 
-        let priority = build_seeds(&map, target);
+        let mut priority = build_seeds(&map, target);
+        if let Some(pool) = self.isp_pool.get() {
+            for (id, tier) in pool.seeds() {
+                if !priority.iter().any(|(pid, _)| *pid == id) {
+                    priority.push((id, tier)); // appended after the same-network tiers
+                }
+            }
+        }
 
         let ts = map
             .entry(target.to_owned())
@@ -1072,5 +1112,85 @@ mod tests {
             }
         }
         assert!(saw_overlap_unix, "unix server sweeps overlap candidates too");
+    }
+
+    // ---- C: ISP seed pool ------------------------------------------------- #
+
+    #[test]
+    fn isp_pool_seeds_come_after_the_probe_and_at_the_default_threshold() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let id5 = g.all()[5].id();
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        // grid[5] proven on two networks of "acme".
+        let mut pool = crate::profile::IspPool::new("acme");
+        let mut sc = ScoredStrategy::new(g.all()[5].clone());
+        sc.trials = 4;
+        sc.successes = 3;
+        pool.merge_session("n1", &[(id5, sc.clone())], 1);
+        pool.merge_session("n2", &[(id5, sc.clone())], 2);
+        disc.set_isp_pool(std::sync::Arc::new(pool));
+
+        // Fresh target, nothing Active on this network: the ISP-pool candidate is
+        // the only seed, and it must NOT skip the naked Probe.
+        let a = disc.assign("fresh.example", None);
+        assert!(a.id.is_none() && a.event.is_none(), "naked Probe still runs");
+        assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Probe));
+
+        // Probe fails -> Discover -> ISP-pool strategy offered ahead of grid[0].
+        disc.record("fresh.example", None, FlowOutcome::DpiReset);
+        let b = disc.assign("fresh.example", None);
+        assert_eq!(b.id, Some(id5));
+        assert_eq!(b.seed_tier, Some(SeedTier::IspPool));
+
+        // One success is not enough — IspPool keeps the default threshold (2),
+        // unlike DomainSibling / HouseStrategy.
+        let (ev, _) = disc.record("fresh.example", Some(id5), FlowOutcome::Success).unwrap();
+        assert!(matches!(ev, DiscoveryEvent::Noted), "got {ev:?}");
+        assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Discover));
+    }
+
+    #[test]
+    fn an_empty_isp_pool_changes_nothing() {
+        let a = Discovery::new(&EvasionConfig::default());
+        a.set_isp_pool(std::sync::Arc::new(crate::profile::IspPool::new("acme")));
+        let b = Discovery::new(&EvasionConfig::default());
+
+        for d in [&a, &b] {
+            let first = d.assign("t.example", None);
+            assert!(first.id.is_none() && first.event.is_none());
+            d.record("t.example", None, FlowOutcome::DpiReset);
+        }
+        let (pa, pb) = (a.assign("t.example", None), b.assign("t.example", None));
+        assert_eq!(pa.id, pb.id, "first Discover candidate identical");
+        assert_eq!(pa.seed_tier, None);
+        assert_eq!(pb.seed_tier, None);
+    }
+
+    #[test]
+    fn promoted_for_isp_returns_active_with_strategy_targets_only() {
+        use crate::strategy::DefaultGenerator;
+        let g = DefaultGenerator::new(&EvasionConfig::default());
+        let (id0, id1) = (g.all()[0].id(), g.all()[1].id());
+        let disc = Discovery::new(&EvasionConfig::default());
+
+        // t1: block, fail grid[0], promote grid[1].
+        disc.assign("t1", None);
+        disc.record("t1", None, FlowOutcome::DpiReset);
+        let a0 = disc.assign("t1", None);
+        assert_eq!(a0.id, Some(id0));
+        disc.record("t1", a0.id, FlowOutcome::DpiReset);
+        let a1 = disc.assign("t1", None);
+        disc.record("t1", a1.id, FlowOutcome::Success);
+        disc.record("t1", a1.id, FlowOutcome::Success);
+        // t2: not blocked -> Active passthrough (no strategy).
+        disc.assign("t2", None);
+        disc.record("t2", None, FlowOutcome::Success);
+
+        let promoted = disc.promoted_for_isp();
+        assert_eq!(promoted.len(), 1, "only the Active-with-strategy target");
+        assert_eq!(promoted[0].0, id1);
+        assert!(promoted[0].1.successes >= 2);
     }
 }
