@@ -139,8 +139,14 @@ fn cfg_for(enable_overlap: bool) -> EvasionConfig {
     EvasionConfig { enable_overlap_disorder: enable_overlap, ..Default::default() }
 }
 
-/// `%LOCALAPPDATA%\Bosphorus\profiles` (falls back to the temp dir).
-fn profile_dir() -> PathBuf {
+/// Where discovery profiles live. `override_dir` (from `--profile-dir`) wins when
+/// given — e.g. to point an interactive run at the service's
+/// `%ProgramData%\Bosphorus\profiles` store. Otherwise
+/// `%LOCALAPPDATA%\Bosphorus\profiles` (falling back to the temp dir).
+fn profile_dir(override_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(d) = override_dir {
+        return d;
+    }
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -400,6 +406,7 @@ pub fn run_engine(
     secs: Option<u64>,
     strategy: Option<Strategy>,
     enable_overlap: bool,
+    profile_dir_override: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     init_tracing();
     let mut cfg = cfg_for(enable_overlap);
@@ -407,7 +414,7 @@ pub fn run_engine(
     // Persistence: discovery runs only (forced `--strategy` runs stay in-memory).
     let net_human = if strategy.is_none() {
         let (human, key) = crate::netkey::compute();
-        cfg.profile = Some(ProfilePaths { dir: profile_dir(), net_key: key });
+        cfg.profile = Some(ProfilePaths { dir: profile_dir(profile_dir_override), net_key: key });
         Some(human)
     } else {
         None

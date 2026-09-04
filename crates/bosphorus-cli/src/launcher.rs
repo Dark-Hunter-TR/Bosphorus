@@ -247,7 +247,7 @@ pub fn run() -> anyhow::Result<()> {
     match dispatch_choice(tui_menu(installed), elevated) {
         ResolvedAction::Exit => Ok(()),
 
-        ResolvedAction::RunEngineHere => crate::engine_cmd::run_engine(None, None, false),
+        ResolvedAction::RunEngineHere => crate::engine_cmd::run_engine(None, None, false, None),
         ResolvedAction::ElevateAndRun => elevate(elevated_run_args(i18n::get()), false),
 
         ResolvedAction::RunSelfTestHere => {

@@ -27,6 +27,8 @@
       ... -Repeat 20                 # unattended: catch the intermittent reset
       ... -GuidedJoins 6             # also do the guided join/leave loop
       ... -NoEngine                  # Phase 1 baseline only (no elevation, no bypass)
+      ... -ProfileDir <path>         # engine --profile-dir (default: auto-detect the
+                                     # service's %ProgramData%\Bosphorus\profiles store)
 
   Windows PowerShell 5.1. Stops/restarts the Bosphorus service for the run.
 #>
@@ -39,6 +41,8 @@ param(
     [int[]]$Ports      = @(443, 2053, 2083, 2087, 2096, 8443),
     [string[]]$Hosts,
     [string]$Exe,
+    [string]$ProfileDir,          # engine --profile-dir; default: auto-detect the
+                                  # service's %ProgramData% store if it has profiles
     [switch]$NoEngine,
     [switch]$NoBaseline
 )
@@ -182,6 +186,19 @@ if ($doPhase1) {
     $hostList = if ($Hosts) { $Hosts } else { Harvest-MediaHosts }
 }
 
+# Interactive `--engine` reads %LOCALAPPDATA%\Bosphorus\profiles by default; the
+# service learns into %ProgramData%\Bosphorus\profiles. For the (b) probe-skip
+# check we want the service's populated store, so auto-point there when it holds
+# any profile (unless -ProfileDir was given, or -NoEngine).
+if (-not $ProfileDir -and -not $NoEngine) {
+    $pd = Join-Path $env:ProgramData 'Bosphorus\profiles'
+    if ((Test-Path $pd) -and @(Get-ChildItem $pd -Filter '*.json' -File -ErrorAction SilentlyContinue).Count) {
+        $ProfileDir = $pd
+    }
+}
+$engineArgs = @()
+if ($ProfileDir) { $engineArgs += @('--profile-dir', $ProfileDir) }
+
 $phaseDesc = @()
 if ($doPhase1)          { $phaseDesc += "1 (battery x $Repeat)" }
 if ($GuidedJoins -gt 0) { $phaseDesc += "2 (guided joins: $GuidedJoins)" }
@@ -193,6 +210,7 @@ Write-Host "  phase  : $($phaseDesc -join ' + ')"
 if ($doPhase1) { Write-Host "  hosts  : $($hostList -join ', ')" }
 Write-Host "  ports  : $($Ports -join ', ')"
 Write-Host "  iters  : $Iters"
+if ($ProfileDir) { Write-Host "  profile: $ProfileDir" -ForegroundColor DarkCyan }
 Write-Host "  output : $outDir`n"
 
 $svc = Get-Service -Name Bosphorus -ErrorAction SilentlyContinue
@@ -222,7 +240,7 @@ for ($rep = 1; ($rep -le $Repeat) -and $doPhase1; $rep++) {
         Write-Host "  --engine (bypass active) ..." -ForegroundColor DarkCyan
         $env:RUST_LOG = 'bosphorus::discovery=debug,bosphorus::conntrack=info,bosphorus::strategy=info'
         $life = [int]($hostList.Count * $Ports.Count * $Iters * 1 + 40)
-        $ep = Start-Bg $exe @('--engine', '--secs', "$life") "engine-r$rep" $outDir
+        $ep = Start-Bg $exe (@('--engine', '--secs', "$life") + $engineArgs) "engine-r$rep" $outDir
         Start-Sleep -Seconds 5
         Run-Battery 'engine' $acc
         Stop-Bg $ep
@@ -235,7 +253,7 @@ $joinRows = @()
 if ($GuidedJoins -gt 0 -and -not $NoEngine) {
     Write-Host "`n[guided joins] --engine up; join/leave a voice channel on cue ..." -ForegroundColor Green
     $env:RUST_LOG = 'bosphorus::discovery=debug,bosphorus::conntrack=info,bosphorus::strategy=info'
-    $gp = Start-Bg $exe @('--engine', '--secs', "$([int]($GuidedJoins * 35 + 30))") 'engine-guided' $outDir
+    $gp = Start-Bg $exe (@('--engine', '--secs', "$([int]($GuidedJoins * 35 + 30))") + $engineArgs) 'engine-guided' $outDir
     Start-Sleep -Seconds 5
     for ($j = 1; $j -le $GuidedJoins; $j++) {
         Write-Host "  >> JOIN a voice channel NOW  (join $j/$GuidedJoins) <<" -ForegroundColor Green

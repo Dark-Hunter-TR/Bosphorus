@@ -4,7 +4,7 @@
 //!   --selftest                       WinDivert verification harness (V1-V4)
 //!   --passthru [--secs N]            raw capture/log/reinject demo
 //!   --check-filters                  build + syntax-check the filter strings
-//!   --engine [--secs N] [--strategy S] [--enable-overlap]   run the core engine
+//!   --engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR]   run the core engine
 //!
 //! `--enable-overlap` opts auto-discovery into the `OverlapDisorder` candidates
 //! (OFF by default — overlap can break a handshake on a first-received-wins
@@ -40,7 +40,7 @@ pub(crate) fn usage() {
     eprintln!("    bosphorus --selftest-m7          overlap/disorder feasibility (V-A/V-B/V-C)");
     eprintln!("    bosphorus --passthru [--secs N]");
     eprintln!("    bosphorus --check-filters");
-    eprintln!("    bosphorus --engine [--secs N] [--strategy S] [--enable-overlap]");
+    eprintln!("    bosphorus --engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR]");
     eprintln!("    bosphorus --discovery-demo       no-elevation proof of the discovery loop");
     eprintln!("    bosphorus --mem-bench [N]        no-elevation RAM footprint probe (N synthetic targets)");
     eprintln!("    bosphorus --observe [--secs N]   analysis: log ALL TCP+UDP (no mutation)");
@@ -52,6 +52,9 @@ pub(crate) fn usage() {
     eprintln!("                            d    = wrongseq|wrongsum|ttl:<u8>|none  (default wrongseq)");
     eprintln!("  --strategy overlap:<sq>/<anchor>   forced OverlapDisorder (disorder + seqovl)");
     eprintln!("  --enable-overlap         opt auto-discovery into OverlapDisorder (default OFF)");
+    eprintln!("  --profile-dir DIR        read/write discovery profiles here instead of");
+    eprintln!("                           %LOCALAPPDATA%\\Bosphorus\\profiles (e.g. the service's");
+    eprintln!("                           %ProgramData%\\Bosphorus\\profiles store)");
     eprintln!("  --lang en|tr             message language (default: English, or Turkish if the");
     eprintln!("                           Windows UI language is Turkish; BOSPHORUS_LANG also works)");
 }
@@ -92,6 +95,7 @@ fn main() -> anyhow::Result<()> {
     i18n::set(resolve_lang(&args));
     let secs = value_after(&args, "--secs").and_then(|s| s.parse::<u64>().ok());
     let enable_overlap = args.iter().any(|a| a == "--enable-overlap");
+    let profile_dir = value_after(&args, "--profile-dir").map(std::path::PathBuf::from);
 
     match args.first().map(String::as_str) {
         Some("service") => service::dispatch(&args),
@@ -106,13 +110,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--observe") => observe::run(secs.unwrap_or(60)),
         Some("--engine") => match value_after(&args, "--strategy") {
-            None => engine_cmd::run_engine(secs, None, enable_overlap),
+            None => engine_cmd::run_engine(secs, None, enable_overlap, profile_dir),
             Some(spec) => match engine_cmd::parse_strategy(spec, enable_overlap)? {
                 StrategyArg::List => {
                     engine_cmd::list_grid(enable_overlap);
                     Ok(())
                 }
-                StrategyArg::One(s) => engine_cmd::run_engine(secs, Some(s), enable_overlap),
+                StrategyArg::One(s) => {
+                    engine_cmd::run_engine(secs, Some(s), enable_overlap, profile_dir)
+                }
             },
         },
         None => launcher::run(),
