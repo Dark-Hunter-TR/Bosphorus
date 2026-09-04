@@ -207,6 +207,26 @@ the key.
   network's file. Roam between home, office, and a phone hotspot for months and
   every network keeps its own learned strategies intact.
 
+### ISP seed pool (`--isp NAME`, opt-in)
+
+NetKey memory is per *network*. `--isp NAME` adds a per-*ISP* layer on top: it
+pools the promoted strategies from every network you've tagged with the same
+`NAME`, and on a **fresh** network of that ISP it offers them to the grid sweep
+before the untried grid. Same idea as the same-network sibling seeding, one level
+further out.
+
+- **Derived, never authoritative.** The pool (`<store>/isp/<name>.json`) is built
+  from the NetKey profiles; deleting it just means a cold start, no learned state
+  is lost.
+- **Weakest seed tier.** An ISP-pool candidate does **not** skip the Probe and
+  promotes at the normal two-successes threshold — it only reorders `Discover`.
+  Same-network `DomainSibling` / `HouseStrategy` seeds always come first.
+- **Corroboration gate.** A strategy is only offered once it was promoted on **≥ 2
+  distinct networks** of the ISP with an aggregate success ratio ≥ 0.6. Re-running
+  on a network you've already contributed just refreshes that entry.
+- The label is yours to assert; it is never inferred (no ASN/WHOIS lookups).
+  Mislabelling only ever costs a wasted grid trial.
+
 ### Live network switching
 
 When you roam Wi-Fi, toggle a VPN, or renew DHCP, a Windows route-change / address
@@ -354,7 +374,7 @@ bosphorus <command> [options]
 
 | Command                                   | Elevation | What it does                                                              |
 |-------------------------------------------|:---------:|------------------------------------------------------------------------|
-| `--engine [--secs N] [--strategy S] [--enable-overlap]` | yes | Run the engine. With no `--strategy`, this is full **auto-discovery** with per-network persistence and live network-switch handling. With `--strategy`, it forces one fixed strategy (network-independent, not persisted). `--secs N` stops automatically after N seconds; otherwise `Ctrl+C`. |
+| `--engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR] [--isp NAME]` | yes | Run the engine. With no `--strategy`, this is full **auto-discovery** with per-network persistence and live network-switch handling. With `--strategy`, it forces one fixed strategy (network-independent, not persisted). `--secs N` stops automatically after N seconds; otherwise `Ctrl+C`. `--profile-dir` overrides where profiles are read/written. `--isp NAME` opts into the cross-network ISP seed pool (below). |
 | `--check-filters`                         | no        | Build the WinDivert filter strings and syntax-check them against `WinDivertHelperCompileFilter`. |
 | `--discovery-demo [--fresh]`              | no        | A no-driver proof that the discovery loop runs and that sweep progress survives across processes. `--fresh` wipes the demo profile first. |
 | `--mem-bench [N]`                         | no        | Drive the engine with `N` synthetic targets (default 2000) and print the RAM footprint. |
@@ -698,6 +718,25 @@ Hamachi / VPN / Radmin sanal adaptörü anahtarı bozmaz.
   yeni ağınkini yükler — başka hiçbir ağın dosyasına dokunmaz, onu birleştirmez
   ya da silmez. Aylarca ev, ofis ve telefon hotspot'u arasında dolaşın; her ağ
   kendi öğrendiği stratejileri bozulmadan korur.
+
+### ISS tohum havuzu (`--isp NAME`, opt-in)
+
+NetKey hafızası *ağ* bazındadır. `--isp NAME` üstüne bir *ISS* katmanı ekler: aynı
+`NAME` ile etiketlediğiniz her ağın terfi eden stratejilerini havuzlar ve o
+ISS'nin **taze** bir ağında bunları denenmemiş grid'den önce sweep'e sunar.
+Aynı-ağ kardeş tohumlamasının bir seviye dışa taşınmış hâli.
+
+- **Türetilir, asla otoriter değil.** Havuz (`<depo>/isp/<name>.json`) NetKey
+  profillerinden inşa edilir; silmek yalnızca soğuk başlangıç demektir, hiçbir
+  öğrenme kaybolmaz.
+- **En zayıf tohum katmanı.** ISS-havuzu adayı Probe'u **atlamaz** ve normal
+  iki-başarı eşiğinde terfi eder — yalnızca `Discover` sırasını değiştirir.
+  Aynı-ağ `DomainSibling` / `HouseStrategy` tohumları her zaman önce gelir.
+- **Korroborasyon kapısı.** Bir strateji ancak ISS'nin **≥ 2 farklı ağında** terfi
+  ettiyse ve toplu başarı oranı ≥ 0.6 ise sunulur. Zaten katkı verdiğiniz bir ağda
+  tekrar koşmak o girdiyi yalnızca tazeler.
+- Etiket sizin beyanınızdır; asla çıkarım yapılmaz (ASN/WHOIS sorgusu yok).
+  Yanlış etiketleme en fazla bir israf grid denemesine mal olur.
 
 ### Canlı ağ değişimi
 

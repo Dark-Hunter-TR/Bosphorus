@@ -152,6 +152,13 @@ enum ProfileDirSource {
     PerUser,
 }
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The per-user default: `%LOCALAPPDATA%\Bosphorus\profiles` (temp-dir fallback).
 fn user_profile_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -455,16 +462,20 @@ pub fn run_engine(
     strategy: Option<Strategy>,
     enable_overlap: bool,
     profile_dir_override: Option<PathBuf>,
+    isp: Option<String>,
 ) -> anyhow::Result<()> {
     init_tracing();
     let mut cfg = cfg_for(enable_overlap);
 
     // Persistence: discovery runs only (forced `--strategy` runs stay in-memory).
     let mut profile_src = None;
+    // (resolved profile dir, net_key) — kept for the ISP pool file below.
+    let mut store_ctx: Option<(PathBuf, String)> = None;
     let net_human = if strategy.is_none() {
         let (human, key) = crate::netkey::compute();
         let (dir, src) = resolve_profile_dir(profile_dir_override, &key);
         profile_src = Some(src);
+        store_ctx = Some((dir.clone(), key.clone()));
         cfg.profile = Some(ProfilePaths { dir, net_key: key });
         Some(human)
     } else {
@@ -500,6 +511,17 @@ pub fn run_engine(
                         ProfileDirSource::PerUser => "per-user %LOCALAPPDATA%",
                     }
                 );
+            }
+            // Feature C: cross-network ISP seed pool (opt-in via --isp).
+            if let (Some(name), Some((dir, _))) = (&isp, &store_ctx) {
+                let pool = bosphorus_core::IspPool::load(dir, name)
+                    .unwrap_or_else(|| bosphorus_core::IspPool::new(name));
+                let n = pool.seeds().len();
+                println!(
+                    "  isp pool: \"{name}\" — {n} seedable strateg{}",
+                    if n == 1 { "y" } else { "ies" }
+                );
+                engine.set_isp_pool(std::sync::Arc::new(pool));
             }
         }
         if enable_overlap {
@@ -607,6 +629,22 @@ pub fn run_engine(
     let run = engine.run_main(&mut src, &mut sink, &stop);
     drop(_netwatch); // stop callbacks before the final flush
     engine.persist_now(); // flush the discovery profile even on a run error
+
+    // Feature C: fold this session's promotions into the ISP seed pool.
+    if let (Some(name), Some((dir, net_key))) = (&isp, &store_ctx) {
+        let promoted = engine.with_discovery(|d| d.promoted_for_isp());
+        let mut pool = bosphorus_core::IspPool::load(dir, name)
+            .unwrap_or_else(|| bosphorus_core::IspPool::new(name));
+        pool.merge_session(net_key, &promoted, now_unix());
+        match pool.save(dir) {
+            Ok(bytes) => println!(
+                "  isp pool: merged {} promoted strateg{} ({bytes} B)",
+                promoted.len(),
+                if promoted.len() == 1 { "y" } else { "ies" }
+            ),
+            Err(e) => tracing::warn!(target: "bosphorus::discovery", error = %e, "isp pool save failed"),
+        }
+    }
     let stats = run?;
 
     println!();
