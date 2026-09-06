@@ -448,6 +448,21 @@ pub fn launcher_install_failed(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `CURRENT` is one process-global atomic. cargo test runs tests on
+    // multiple threads by default, so any two tests that both `set()` it and
+    // then assert on `t()`/`get()` race — one thread's `set(Tr)` can land
+    // between another thread's `set(En)` and its assertion, failing a test
+    // whose own code never changed. Every test below that touches `CURRENT`
+    // takes this lock first so they run one at a time; a poisoned lock (an
+    // earlier such test panicked mid-switch) still yields the guard, since
+    // the only shared state at risk is `CURRENT` itself, always reset before
+    // the guard drops.
+    static LANG_TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn lock_lang() -> std::sync::MutexGuard<'static, ()> {
+        LANG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn parse_accepts_both_and_rejects_junk() {
@@ -459,6 +474,7 @@ mod tests {
 
     #[test]
     fn catalogue_switches_with_the_global_lang() {
+        let _guard = lock_lang();
         set(Lang::En);
         assert!(t(Msg::DiscoveryWarning).starts_with("Bosphorus runs fully automatically"));
         assert_eq!(engine_finished(1, 2, 3, 4), "engine finished: 1 packets, 2 KB, 3 dropped, 4 batched");
@@ -472,6 +488,7 @@ mod tests {
 
     #[test]
     fn origin_tags_are_language_independent() {
+        let _guard = lock_lang();
         set(Lang::En);
         let en = (t(Msg::OriginDisk), t(Msg::OriginNew));
         set(Lang::Tr);
@@ -481,6 +498,7 @@ mod tests {
 
     #[test]
     fn launcher_strings_switch_with_the_global_lang() {
+        let _guard = lock_lang();
         set(Lang::En);
         assert!(launcher_install_ok().contains("installed and running"));
         assert!(launcher_install_failed("x").contains("could not be installed"));
@@ -498,6 +516,7 @@ mod tests {
 
     #[test]
     fn tui_help_uses_arrow_glyphs_in_both_langs() {
+        let _guard = lock_lang();
         set(Lang::En);
         assert!(t(Msg::TuiHelp).contains('\u{2191}') && t(Msg::TuiHelp).contains("quit"));
         set(Lang::Tr);

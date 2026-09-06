@@ -55,9 +55,12 @@ jobs:
         run: cargo build --workspace --profile release-dist --locked
 
       # Cheap end-to-end smoke test: the built exe actually loads
-      # WinDivert.dll and compiles its own filters. No elevation needed.
+      # WinDivert.dll, reports its own version, and compiles its filters. No
+      # elevation needed.
       - name: Smoke test the built binary
-        run: ./target/release-dist/bosphorus.exe --check-filters
+        run: |
+          ./target/release-dist/bosphorus.exe --version
+          ./target/release-dist/bosphorus.exe --check-filters
 
       - name: Stage artifact
         shell: pwsh
@@ -82,6 +85,23 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      # Catch a tag that doesn't match [workspace.package].version in
+      # Cargo.toml before a Release goes out under the wrong name — bump
+      # Cargo.toml (or the tag) and re-push if this fails.
+      - name: Verify tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          if ($cargoVersion -ne $tagVersion) {
+            Write-Error "tag v$tagVersion != [workspace.package] version $cargoVersion in Cargo.toml"
+            exit 1
+          }
+          Write-Host "OK: tag matches Cargo.toml version $cargoVersion"
+
       - uses: actions/download-artifact@v4
         with:
           name: bosphorus-windows-x64

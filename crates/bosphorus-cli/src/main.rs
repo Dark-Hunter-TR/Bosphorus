@@ -33,8 +33,13 @@ mod service;
 
 use engine_cmd::StrategyArg;
 
+/// `CARGO_PKG_VERSION` of this binary (workspace-centralized in the root
+/// `Cargo.toml`'s `[workspace.package]`). Printed by `--version`/`-V` and
+/// echoed at the top of `usage()` so a bug report always carries it.
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub(crate) fn usage() {
-    eprintln!("bosphorus (M5)\n");
+    eprintln!("bosphorus {VERSION}\n");
     eprintln!("USAGE:");
     eprintln!("    bosphorus --selftest");
     eprintln!("    bosphorus --selftest-m7          overlap/disorder feasibility (V-A/V-B/V-C)");
@@ -60,6 +65,7 @@ pub(crate) fn usage() {
     eprintln!("                           settled on (discovery mode only; derived, safe to delete)");
     eprintln!("  --lang en|tr             message language (default: English, or Turkish if the");
     eprintln!("                           Windows UI language is Turkish; BOSPHORUS_LANG also works)");
+    eprintln!("  --version, -V            print the version and exit");
 }
 
 fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -95,6 +101,10 @@ fn windows_ui_is_turkish() -> bool {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("bosphorus {VERSION}");
+        return Ok(());
+    }
     i18n::set(resolve_lang(&args));
     let secs = value_after(&args, "--secs").and_then(|s| s.parse::<u64>().ok());
     let enable_overlap = args.iter().any(|a| a == "--enable-overlap");
