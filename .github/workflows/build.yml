@@ -1,0 +1,98 @@
+name: build
+
+# Laptop-less CI: every push to main, every PR, and any manual run produces a
+# downloadable Windows binary under the workflow's "Artifacts" section — no
+# local Windows machine or Rust toolchain needed to get a fresh bosphorus.exe.
+# Pushing a `v*` tag additionally publishes a GitHub Release (see release.yml).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  WINDIVERT_VERSION: 2.2.2
+  WINDIVERT_ASSET: WinDivert-2.2.2-A.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel + x86_64-pc-windows-msvc target;
+      # `rustup show` installs whatever it declares.
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # assets/ is git-ignored (see .gitignore + README "Building from
+      # source"). Fetch the same official basil00/WinDivert v2.2.2 binaries a
+      # human contributor would download by hand, and unpack them to the exact
+      # path .cargo/config.toml's WINDIVERT_PATH expects.
+      - name: Fetch WinDivert ${{ env.WINDIVERT_VERSION }} runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/basil00/WinDivert/releases/download/v$env:WINDIVERT_VERSION/$env:WINDIVERT_ASSET"
+          Invoke-WebRequest -Uri $url -OutFile windivert.zip
+          Expand-Archive -Path windivert.zip -DestinationPath assets -Force
+          Get-ChildItem "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64"
+
+      # No driver, no Administrator: bosphorus-divert's compile_filter() only
+      # calls WinDivertHelperCompileFilter (user-mode), and build.rs stages
+      # WinDivert.dll next to the test binaries. See README "Requirements".
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      # release-dist = the shipped artifact: fat LTO, stripped symbols.
+      - name: Build (release-dist)
+        run: cargo build --workspace --profile release-dist --locked
+
+      # Cheap end-to-end smoke test: the built exe actually loads
+      # WinDivert.dll and compiles its own filters. No elevation needed.
+      - name: Smoke test the built binary
+        run: ./target/release-dist/bosphorus.exe --check-filters
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release-dist/bosphorus.exe dist/
+          Copy-Item "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64/WinDivert.dll" dist/
+          Copy-Item "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64/WinDivert64.sys" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bosphorus-windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  # Push a `v*` tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to get a
+  # permanent, linkable download instead of a 90-day workflow artifact.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bosphorus-windows-x64
+          path: dist
+
+      - name: Zip release asset
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "bosphorus-${{ github.ref_name }}-windows-x64.zip"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bosphorus-*-windows-x64.zip
+          generate_release_notes: true

@@ -1,5 +1,7 @@
 # Bosphorus
 
+[![build](https://github.com/Dark-Hunter-TR/Bosphorus/actions/workflows/build.yml/badge.svg)](https://github.com/Dark-Hunter-TR/Bosphorus/actions/workflows/build.yml)
+
 **A self-learning DPI (Deep Packet Inspection) bypass engine for Windows.**
 Bosphorus captures outbound TLS handshakes with WinDivert, automatically discovers
 which packet-manipulation strategy defeats the censor on *your* network for *each*
@@ -330,6 +332,15 @@ Cargo workspace, three crates:
   from source.
 
 ## Building from source
+
+> **No Windows machine handy?** Every push to `main`, every pull request, and
+> every manual run of the [`build`](../../actions/workflows/build.yml)
+> workflow compiles `bosphorus.exe` on a GitHub-hosted Windows runner and
+> uploads it (with `WinDivert.dll` / `WinDivert64.sys`) as a downloadable
+> workflow artifact — open the latest green run's **Summary** tab and grab
+> `bosphorus-windows-x64` under **Artifacts**. Pushing a `v*` tag additionally
+> publishes those files as a permanent GitHub Release. No local Rust
+> toolchain or WinDivert download required.
 
 1. **Get the WinDivert 2.2.2 binaries.** Download the official
    `WinDivert-2.2.2-A.zip` from the `basil00/WinDivert` v2.2.2 release and unpack
@@ -840,6 +851,16 @@ Cargo workspace, üç crate:
   ≥ 1.80).
 
 ## Kaynaktan derleme
+
+> **Elinizde Windows makine yok mu?** `main`'e her push, her pull request ve
+> [`build`](../../actions/workflows/build.yml) iş akışının her manuel
+> çalıştırması, `bosphorus.exe`'yi GitHub'ın barındırdığı bir Windows
+> runner'da derler ve (`WinDivert.dll` / `WinDivert64.sys` ile birlikte)
+> indirilebilir bir iş akışı çıktısı olarak yükler — en son yeşil çalışmanın
+> **Summary** sekmesinden **Artifacts** altındaki `bosphorus-windows-x64`'ü
+> indirin. Bir `v*` etiketi push etmek bu dosyaları kalıcı bir GitHub Release
+> olarak da yayınlar. Yerel bir Rust kurulumu veya WinDivert indirmesi
+> gerekmez.
 
 1. **WinDivert 2.2.2 ikili dosyalarını edinin.** `basil00/WinDivert` v2.2.2
    sürümünden resmi `WinDivert-2.2.2-A.zip` dosyasını indirin ve şu yol
