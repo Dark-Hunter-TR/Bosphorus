@@ -248,7 +248,9 @@ pub fn run() -> anyhow::Result<()> {
         ResolvedAction::Exit => Ok(()),
 
         ResolvedAction::RunEngineHere => {
-            crate::engine_cmd::run_engine(None, None, false, None, None)
+            let res = crate::engine_cmd::run_engine(None, None, false, None, None);
+            pause();
+            res
         }
         ResolvedAction::ElevateAndRun => elevate(elevated_run_args(i18n::get()), false),
 
@@ -737,9 +739,13 @@ fn read_key() -> Key {
 // --------------------------------------------------------------------------- //
 
 /// True when this process is the only one attached to its console — i.e. the
-/// console was created because Explorer launched the exe. `> 1` means we were
-/// started from an existing shell.
-fn is_double_click() -> bool {
+/// console was created because Explorer launched the exe, or (same shape)
+/// because `elevate()`'s `ShellExecuteW "runas"` spawned a fresh elevated
+/// process with its own new console. `> 1` means we share a console with a
+/// shell that was already there (typed at a prompt) — used by `main`'s
+/// `finish()` to decide whether a window would otherwise vanish with no
+/// prompt to return to.
+pub(crate) fn is_double_click() -> bool {
     let mut list = [0u32; 4];
     // SAFETY: `list` is a valid, writable buffer of `list.len()` u32s.
     let n = unsafe { GetConsoleProcessList(&mut list) };

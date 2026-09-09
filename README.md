@@ -433,7 +433,7 @@ bosphorus --engine --strategy grid:0              # whatever the first grid entr
 ## Running as a Windows Service
 
 ```powershell
-# Install: creates the "Bosphorus" service (LocalSystem, delayed auto-start,
+# Install: creates the "Bosphorus" service (LocalSystem, auto-start,
 # restart-on-failure) and starts it. Pre-flights the WinDivert driver load.
 bosphorus service install [--lang en|tr] [--enable-overlap]
                           [--profile-dir <path>] [--install-dir <path>]
@@ -955,7 +955,7 @@ bosphorus --engine --strategy grid:0              # ilk grid girdisi neyse
 ## Windows Hizmeti olarak çalıştırma
 
 ```powershell
-# Kurulum: "Bosphorus" hizmetini oluşturur (LocalSystem, gecikmeli otomatik
+# Kurulum: "Bosphorus" hizmetini oluşturur (LocalSystem, otomatik
 # başlangıç, hata sonrası yeniden başlatma) ve başlatır. WinDivert sürücü
 # yüklemesini ön-kontrol eder.
 bosphorus service install [--lang en|tr] [--enable-overlap]

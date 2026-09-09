@@ -99,6 +99,35 @@ fn windows_ui_is_turkish() -> bool {
     (langid & 0x3FF) == LANG_TURKISH
 }
 
+/// Report `result`, then exit — holding the window open first if this process
+/// owns its console alone.
+///
+/// `--engine` and `--selftest` are the two commands the launcher's `elevate()`
+/// spawns as a *visible* new window (`ShellExecuteW "runas"`, not hidden). A
+/// plain `return`ed `Err` there used to fall through to `main`'s default
+/// `Result` reporting and exit immediately — on a driver-load failure (HVCI,
+/// Smart App Control, no Administrator) the freshly opened window closed
+/// before anyone could read why. Only called where the console is known to be
+/// either a normal shell (this is a no-op past the `is_double_click` check —
+/// exact same exit code, no pause) or one of those two visible re-spawns:
+/// never call it from the hidden `service install/uninstall --from-launcher`
+/// path, which reports through a MessageBox and has no one to press Enter.
+fn finish(result: anyhow::Result<()>) -> ! {
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    };
+    if launcher::is_double_click() {
+        println!("\n{}", i18n::t(i18n::Msg::TuiPressKey));
+        let mut s = String::new();
+        let _ = std::io::stdin().read_line(&mut s);
+    }
+    std::process::exit(code);
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -113,7 +142,7 @@ fn main() -> anyhow::Result<()> {
 
     match args.first().map(String::as_str) {
         Some("service") => service::dispatch(&args),
-        Some("--selftest") => selftest::run_all(),
+        Some("--selftest") => finish(selftest::run_all()),
         Some("--selftest-m7") => selftest_m7::run(),
         Some("--passthru") => passthru::run(secs),
         Some("--check-filters") => engine_cmd::check_filters(),
@@ -124,14 +153,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some("--observe") => observe::run(secs.unwrap_or(60)),
         Some("--engine") => match value_after(&args, "--strategy") {
-            None => engine_cmd::run_engine(secs, None, enable_overlap, profile_dir, isp),
+            None => finish(engine_cmd::run_engine(secs, None, enable_overlap, profile_dir, isp)),
             Some(spec) => match engine_cmd::parse_strategy(spec, enable_overlap)? {
                 StrategyArg::List => {
                     engine_cmd::list_grid(enable_overlap);
                     Ok(())
                 }
                 StrategyArg::One(s) => {
-                    engine_cmd::run_engine(secs, Some(s), enable_overlap, profile_dir, isp)
+                    finish(engine_cmd::run_engine(secs, Some(s), enable_overlap, profile_dir, isp))
                 }
             },
         },

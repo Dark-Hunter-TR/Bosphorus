@@ -349,8 +349,8 @@ pub fn preflight_warn_forced(err: &str) -> String {
 
 pub fn svc_created(name: &str) -> String {
     match get() {
-        Lang::En => format!("service '{name}' created (LocalSystem, delayed-auto-start) and started."),
-        Lang::Tr => format!("'{name}' hizmeti oluşturuldu (LocalSystem, gecikmeli-otomatik-başlangıç) ve başlatıldı."),
+        Lang::En => format!("service '{name}' created (LocalSystem, auto-start) and started."),
+        Lang::Tr => format!("'{name}' hizmeti oluşturuldu (LocalSystem, otomatik-başlangıç) ve başlatıldı."),
     }
 }
 
