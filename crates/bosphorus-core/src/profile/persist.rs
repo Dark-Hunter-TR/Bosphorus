@@ -49,6 +49,9 @@ pub struct PersistedTarget {
     pub active: Option<StrategyId>,
     pub consecutive_failure: u8,
     pub server_initial_ttl: Option<u8>,
+    /// Absent in profiles written before this existed — defaults to `None`.
+    #[serde(default)]
+    pub injector_hops: Option<u8>,
     pub grid_size_at_exhaustion: Option<usize>,
 }
 
@@ -147,6 +150,7 @@ mod tests {
                 active: None,
                 consecutive_failure: 1,
                 server_initial_ttl: Some(128),
+                injector_hops: Some(4),
                 grid_size_at_exhaustion: None,
             }],
         )
@@ -172,9 +176,28 @@ mod tests {
         save(dir.path(), key, &sample()).unwrap();
         let back = load(dir.path(), key).unwrap();
         assert_eq!(back.targets[0].server_initial_ttl, Some(128));
+        assert_eq!(back.targets[0].injector_hops, Some(4));
         assert_eq!(back.grid_signature, 0xdead_beef);
         // No stray temp file left behind.
         assert!(!tmp_files(dir.path()).iter().any(|_| true), "left a .tmp file");
+    }
+
+    #[test]
+    fn missing_injector_hops_field_defaults_to_none() {
+        // A target JSON written before `injector_hops` existed, e.g. from an
+        // older build. #[serde(default)] must let it load, not just skip it.
+        let json = r#"{
+            "key": "example.com",
+            "phase": "Discover",
+            "tried": [],
+            "scores": [],
+            "active": null,
+            "consecutive_failure": 0,
+            "server_initial_ttl": null,
+            "grid_size_at_exhaustion": null
+        }"#;
+        let pt: PersistedTarget = serde_json::from_str(json).expect("old-format target still loads");
+        assert_eq!(pt.injector_hops, None);
     }
 
     #[test]

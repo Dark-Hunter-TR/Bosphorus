@@ -546,7 +546,13 @@ mod tests {
         let g = DefaultGenerator::new(&overlap_cfg);
         let mut ok = 0;
         for s in g.all() {
-            let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(12), max_seg: 1200 };
+            let ctx = TransformCtx {
+                view: &view,
+                meta: &meta,
+                hops_to_server: Some(12),
+                discovered_ttl: None,
+                max_seg: 1200,
+            };
             let mut out = SendBatch::new();
             // Must not panic; Ok (batch produced) or a clean Err are both fine.
             if apply_strategy(s, &ctx, &mut out).is_ok() {

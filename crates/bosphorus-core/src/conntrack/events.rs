@@ -37,6 +37,17 @@ fn guess_hops(observed_ttl: u8) -> Option<(u8, u8)> {
     None
 }
 
+/// Record the hop count implied by a blocking packet's own TTL (a DPI
+/// fingerprint: the real server's own reset would carry roughly its SYN-ACK's
+/// hop count, so a lower one here points at an in-path injector, and the
+/// number is exactly the TTL a `TtlLimited` fake needs to reach it without
+/// reaching the real server beyond it — see `TtlPolicy::Discovered`). Best
+/// effort: silently leaves `injector_hops` at `None` if the TTL doesn't match
+/// any common initial value.
+fn note_injector_hops(st: &mut FlowState, v: &PacketView<'_>) {
+    st.injector_hops = guess_hops(v.ttl()).map(|(_, hops)| hops);
+}
+
 /// Update `st` from an outbound (client -> server) packet. Returns a verdict if
 /// one becomes certain (only `Blackhole`, from ClientHello retransmits).
 pub fn observe_outbound(st: &mut FlowState, v: &PacketView<'_>, now: Instant, tuning: &ConntrackTuning) -> Option<FlowOutcome> {
@@ -98,11 +109,13 @@ pub fn observe_inbound(
                 // The handshake got through. Reset inside the grace window =
                 // delayed-reset DPI; past it, the flow held and this is a close.
                 if within_grace(st, now, tuning) {
+                    note_injector_hops(st, v);
                     set(st, FlowOutcome::LateReset)
                 } else {
                     set(st, FlowOutcome::Success)
                 }
             } else if st.client_hello_seen {
+                note_injector_hops(st, v);
                 set(st, FlowOutcome::DpiReset)
             } else {
                 set(st, FlowOutcome::TlsError)
@@ -132,6 +145,7 @@ pub fn observe_inbound(
                 && payload.get(5) == Some(&2)
                 && within_grace(st, now, tuning) =>
         {
+            note_injector_hops(st, v);
             return set(st, FlowOutcome::LateReset)
         }
         _ => {}
@@ -370,6 +384,51 @@ mod tests {
         observe_inbound(&mut st, &view(&v4_tcp(117, T_SA, 0, &[])), now, &t);
         let rst = v4_tcp(117, T_RST, 0, &[]);
         assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::TlsError));
+        assert_eq!(st.injector_hops, None, "not a DPI verdict, no injector fingerprint taken");
+    }
+
+    #[test]
+    fn dpi_reset_records_the_injecting_devices_hop_count() {
+        let now = Instant::now();
+        let mut st = FlowState::new(now);
+        let t = tuning();
+
+        // Server is 11 hops away (SYN-ACK TTL 117 -> initial 128).
+        observe_inbound(&mut st, &view(&v4_tcp(117, T_SA, 0, &[])), now, &t);
+        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+
+        // The RST itself arrives with TTL 60 -> initial 64 -> only 4 hops away:
+        // much closer than the server, the classic in-path-injector signature.
+        let rst = v4_tcp(60, T_RST, 0, &[]);
+        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::DpiReset));
+        assert_eq!(st.injector_hops, Some(4));
+    }
+
+    #[test]
+    fn late_reset_also_records_injector_hops() {
+        let now = Instant::now();
+        let mut st = FlowState::new(now);
+        let t = tuning();
+
+        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+
+        let early = now + t.app_grace / 2;
+        let rst = v4_tcp(60, T_RST, 0, &[]);
+        assert_eq!(observe_inbound(&mut st, &view(&rst), early, &t), Some(FlowOutcome::LateReset));
+        assert_eq!(st.injector_hops, Some(4));
+    }
+
+    #[test]
+    fn injector_hops_is_none_when_the_ttl_matches_no_common_initial_value() {
+        let now = Instant::now();
+        let mut st = FlowState::new(now);
+        let t = tuning();
+        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+        // TTL 200: > 32 hops from every common initial (64/128/255) — guess_hops fails.
+        let rst = v4_tcp(200, T_RST, 0, &[]);
+        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::DpiReset));
+        assert_eq!(st.injector_hops, None);
     }
 
     #[test]
