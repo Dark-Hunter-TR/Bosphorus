@@ -276,7 +276,7 @@ impl Engine {
             }
         });
         if let Some(outcome) = verdict {
-            let (name, trial, target, ch_at, retx) = self
+            let (name, trial, target, ch_at, retx, injector_hops) = self
                 .flows
                 .peek(&key, |st| {
                     (
@@ -285,12 +285,14 @@ impl Engine {
                         st.target_key.clone(),
                         st.client_hello_at,
                         st.client_hello_retx,
+                        st.injector_hops,
                     )
                 })
-                .unwrap_or((None, None, None, None, 0));
+                .unwrap_or((None, None, None, None, 0, None));
             let timing = VerdictTiming {
                 latency: ch_at.map(|t| now.saturating_duration_since(t)),
                 retx,
+                injector_hops,
             };
             log_outcome(&key, name.as_deref(), outcome, "packet");
             self.feed_discovery(&session.discovery, target.as_deref(), trial, outcome, timing);
@@ -331,34 +333,40 @@ impl Engine {
         let hops = self.flows.peek(key, |st| st.hops_to_server).flatten();
 
         // Which strategy? forced override, or ask discovery.
-        let (target, strat, trial): (String, Option<Strategy>, TrialRecord) = match &self.forced {
-            Some(s) => {
-                let target = sni_target(view.payload()).unwrap_or_else(|| key.server_ip.to_string());
-                (target, Some(s.clone()), TrialRecord { id: Some(s.id()), kind: TrialKind::Exploit })
-            }
-            None => {
-                // Discovery must key by SNI. A fragmented / ECH ClientHello with
-                // no readable SNI is NOT registered as an IP-keyed target and is
-                // NOT mutated — it either reuses a target already learned for
-                // this exact flow, or it passes through untouched.
-                let target = match sni_target(view.payload())
-                    .or_else(|| self.flows.peek(key, |st| st.target_key.clone()).flatten())
-                {
-                    Some(t) => t,
-                    None => {
-                        tracing::debug!(
-                            target: "bosphorus::discovery",
-                            server_ip = %key.server_ip, client_port = key.client_port,
-                            "ClientHello without readable SNI (fragmented/ECH); passthrough, no discovery"
-                        );
-                        return Decision::ForwardOriginal;
-                    }
-                };
-                let server_ttl = self.flows.peek(key, |st| st.remote_initial_ttl).flatten();
-                let a = discovery.assign(&target, server_ttl);
-                (target, a.strategy, TrialRecord { id: a.id, kind: a.kind })
-            }
-        };
+        let (target, strat, trial, discovered_ttl): (String, Option<Strategy>, TrialRecord, Option<u8>) =
+            match &self.forced {
+                Some(s) => {
+                    let target = sni_target(view.payload()).unwrap_or_else(|| key.server_ip.to_string());
+                    (
+                        target,
+                        Some(s.clone()),
+                        TrialRecord { id: Some(s.id()), kind: TrialKind::Exploit },
+                        None,
+                    )
+                }
+                None => {
+                    // Discovery must key by SNI. A fragmented / ECH ClientHello with
+                    // no readable SNI is NOT registered as an IP-keyed target and is
+                    // NOT mutated — it either reuses a target already learned for
+                    // this exact flow, or it passes through untouched.
+                    let target = match sni_target(view.payload())
+                        .or_else(|| self.flows.peek(key, |st| st.target_key.clone()).flatten())
+                    {
+                        Some(t) => t,
+                        None => {
+                            tracing::debug!(
+                                target: "bosphorus::discovery",
+                                server_ip = %key.server_ip, client_port = key.client_port,
+                                "ClientHello without readable SNI (fragmented/ECH); passthrough, no discovery"
+                            );
+                            return Decision::ForwardOriginal;
+                        }
+                    };
+                    let server_ttl = self.flows.peek(key, |st| st.remote_initial_ttl).flatten();
+                    let a = discovery.assign(&target, server_ttl);
+                    (target, a.strategy, TrialRecord { id: a.id, kind: a.kind }, a.discovered_ttl)
+                }
+            };
 
         self.flows.with_mut(*key, now, |st| {
             st.target_key = Some(target.clone());
@@ -378,6 +386,7 @@ impl Engine {
             view,
             meta,
             hops_to_server: hops,
+            discovered_ttl,
             max_seg: self.cfg.max_segment as usize,
         };
         match apply_strategy(&strat, &ctx, out) {
@@ -503,7 +512,10 @@ impl Engine {
         }
         for rf in self.flows.resolve_timeouts(&self.cfg.conntrack, now) {
             log_outcome(&rf.key, rf.server_name.as_deref(), rf.outcome, "timeout");
-            let timing = VerdictTiming { latency: rf.latency, retx: rf.retx };
+            // A timeout-resolved flow never carries a blocking packet to
+            // fingerprint (DpiReset/LateReset only ever fire on the live
+            // packet path above).
+            let timing = VerdictTiming { latency: rf.latency, retx: rf.retx, injector_hops: None };
             self.feed_discovery(
                 &session.discovery,
                 rf.target_key.as_deref(),

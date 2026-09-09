@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::strategy::StrategyId;
 
-/// Timing a verdict carries back to discovery scoring. `NONE` = "the caller had
-/// no timing to offer" (synthetic verdicts, tests). Produced by the engine from
-/// the flow's `client_hello_at` / `client_hello_retx`; consumed by
-/// [`ScoredStrategy::note`](score::ScoredStrategy::note).
+/// Timing (and, for a DPI verdict, a path fingerprint) a verdict carries back
+/// to discovery. `NONE` = "the caller had nothing to offer" (synthetic
+/// verdicts, tests). Produced by the engine from the flow's `client_hello_at`
+/// / `client_hello_retx` / `injector_hops`; `latency`/`retx` are consumed by
+/// [`ScoredStrategy::note`](score::ScoredStrategy::note), `injector_hops` by
+/// [`TargetState::injector_hops`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VerdictTiming {
     /// ClientHello -> verdict wall time, when the ClientHello instant was known.
@@ -26,11 +28,14 @@ pub struct VerdictTiming {
     /// ClientHello retransmits observed on the flow before the verdict. `> 0`
     /// means the handshake paid at least one TCP RTO.
     pub retx: u8,
+    /// Hops from the client to the device that sent a `DpiReset`/`LateReset`,
+    /// guessed from that packet's own TTL. `None` for every other verdict.
+    pub injector_hops: Option<u8>,
 }
 
 impl VerdictTiming {
     /// No timing information (synthetic verdict / test).
-    pub const NONE: Self = Self { latency: None, retx: 0 };
+    pub const NONE: Self = Self { latency: None, retx: 0, injector_hops: None };
 }
 
 /// Where a target is in the discovery lifecycle.
@@ -143,6 +148,12 @@ pub struct TargetState {
     /// the first SYN-ACK observed for this target; used to gate overlap-family
     /// candidates (a first-received-wins server would keep the junk overlap).
     pub server_initial_ttl: Option<u8>,
+    /// Measured hops to this target's DPI injector (see
+    /// [`VerdictTiming::injector_hops`]). Set once, from the first `DpiReset`/
+    /// `LateReset` whose blocking packet's TTL resolved cleanly; feeds
+    /// `TtlPolicy::Discovered` for every later `AutoHeuristic` trial against
+    /// this target, in place of the blind heuristic.
+    pub injector_hops: Option<u8>,
     pub created_at: Instant,
     pub updated_at: Instant,
 
@@ -179,6 +190,7 @@ impl TargetState {
             active: None,
             consecutive_failure: 0,
             server_initial_ttl: None,
+            injector_hops: None,
             created_at: now,
             updated_at: now,
             in_flight: Vec::new(),

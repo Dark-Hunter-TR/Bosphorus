@@ -62,6 +62,13 @@ pub struct FlowState {
     /// fatal alert tears it down first, giving `LateReset`).
     pub server_hello_at: Option<Instant>,
     pub inbound_rst: bool,
+    /// Hops from the client to whatever sent the blocking RST/alert, guessed
+    /// from its TTL the same way as `hops_to_server` — set only on a
+    /// `DpiReset` / `LateReset` verdict. A real server's own reset carries
+    /// roughly the same hop count as its SYN-ACK; a lower count here is an
+    /// in-path injector, and the number itself is the TTL a `TtlLimited` fake
+    /// packet needs to reach it without reaching the real server beyond it.
+    pub injector_hops: Option<u8>,
 
     pub bytes_out: u64,
     pub bytes_in: u64,
@@ -95,6 +102,7 @@ impl FlowState {
             server_hello_seen: false,
             server_hello_at: None,
             inbound_rst: false,
+            injector_hops: None,
             bytes_out: 0,
             bytes_in: 0,
             target_key: None,

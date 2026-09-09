@@ -137,6 +137,7 @@ impl Discovery {
             let mut ts = TargetState::new(pt.key.clone(), now);
             ts.from_disk = true;
             ts.server_initial_ttl = pt.server_initial_ttl;
+            ts.injector_hops = pt.injector_hops;
 
             if ids_ok {
                 ts.phase = pt.phase;
@@ -199,6 +200,7 @@ impl Discovery {
                 active: ts.active,
                 consecutive_failure: ts.consecutive_failure,
                 server_initial_ttl: ts.server_initial_ttl,
+                injector_hops: ts.injector_hops,
                 grid_size_at_exhaustion: ts.grid_size_at_exhaustion,
             })
             .collect();
@@ -629,8 +631,8 @@ mod tests {
         a.record(t, None, FlowOutcome::DpiReset); // -> Discover
 
         let x = a.assign(t, Some(128));
-        let fast = VerdictTiming { latency: Some(Duration::from_millis(180)), retx: 0 };
-        let faster = VerdictTiming { latency: Some(Duration::from_millis(150)), retx: 0 };
+        let fast = VerdictTiming { latency: Some(Duration::from_millis(180)), retx: 0, injector_hops: None };
+        let faster = VerdictTiming { latency: Some(Duration::from_millis(150)), retx: 0, injector_hops: None };
         a.record_timed(t, x.id, FlowOutcome::Success, fast);
         a.record_timed(t, x.id, FlowOutcome::Success, faster); // 2nd success -> promoted
 
@@ -669,13 +671,46 @@ mod tests {
             t,
             x.id,
             FlowOutcome::Success,
-            VerdictTiming { latency: Some(Duration::from_millis(1300)), retx: 1 },
+            VerdictTiming { latency: Some(Duration::from_millis(1300)), retx: 1, injector_hops: None },
         );
         let m = a.targets.lock();
         let q = &m.get(t).unwrap().scores.get(&x.id.unwrap()).unwrap().quality;
         assert_eq!(q.slow_successes, 1);
         assert_eq!(q.retx_free_successes, 0);
         assert!(!q.looks_fast());
+    }
+
+    /// End-to-end proof of the TTL-discovery feature: a `DpiReset`'s measured
+    /// injector distance is stored on the target and handed back on every
+    /// later `assign` — the actual value `engine::act_on_client_hello` would
+    /// feed into `TransformCtx::discovered_ttl` for the next trial.
+    #[test]
+    fn injector_hops_measured_from_a_dpi_reset_feeds_later_assignments() {
+        let a = Discovery::new(&EvasionConfig::default());
+        let t = "injected.example";
+
+        let probe = a.assign(t, None);
+        assert_eq!(probe.discovered_ttl, None, "nothing measured yet");
+
+        a.record_timed(
+            t,
+            probe.id,
+            FlowOutcome::DpiReset,
+            VerdictTiming { latency: None, retx: 0, injector_hops: Some(4) },
+        );
+
+        let next = a.assign(t, None);
+        assert_eq!(next.discovered_ttl, Some(4));
+
+        // Set once: a later, different measurement on the same target must
+        // not overwrite the first (mirrors server_initial_ttl's contract).
+        a.record_timed(
+            t,
+            next.id,
+            FlowOutcome::DpiReset,
+            VerdictTiming { latency: None, retx: 0, injector_hops: Some(9) },
+        );
+        assert_eq!(a.assign(t, None).discovered_ttl, Some(4), "first measurement wins");
     }
 
     // --- Phase 2: sibling / house-strategy seeding ---
@@ -849,6 +884,7 @@ mod tests {
                 active: None,
                 consecutive_failure: 2,
                 server_initial_ttl: Some(64),
+                injector_hops: Some(5),
                 grid_size_at_exhaustion: None,
             }],
         );
@@ -860,7 +896,12 @@ mod tests {
         assert_eq!(ts.tried, 0, "stale tried list dropped");
         assert_eq!(ts.phase, NetPhase::Probe, "reset to Probe");
         assert!(ts.from_disk);
-        // Only the learned TTL survives (checked indirectly: no panic, target kept).
+        // The learned TTLs survive the degrade — both are set unconditionally
+        // in load_persisted, before the ids_ok check.
+        let m = d.targets.lock();
+        let restored_ts = m.get("x.example").unwrap();
+        assert_eq!(restored_ts.server_initial_ttl, Some(64));
+        assert_eq!(restored_ts.injector_hops, Some(5));
     }
 
     /// The headline M8 proof: a target that Exhausted a 2-candidate grid,

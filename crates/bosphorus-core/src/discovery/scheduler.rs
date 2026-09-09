@@ -29,6 +29,11 @@ pub struct Assignment {
     /// `Some` when this candidate was taken from the seed list (out of grid
     /// order) rather than the grid sweep — the tier it came from.
     pub seed_tier: Option<SeedTier>,
+    /// This target's measured DPI-injector distance, if it has one yet — see
+    /// [`TargetState::injector_hops`]. Always mirrors the target's current
+    /// value regardless of which branch below produced the assignment (set
+    /// once, after the `match`, not per literal).
+    pub discovered_ttl: Option<u8>,
 }
 
 /// The state transition a `record` caused (for logging).
@@ -144,6 +149,7 @@ impl Scheduler {
                             kind: TrialKind::Explore,
                             event: Some(DiscoveryEvent::ProbeSkipped { via: tier }),
                             seed_tier: Some(tier),
+                            discovered_ttl: None,
                         }
                     }
                     None => Assignment {
@@ -152,6 +158,7 @@ impl Scheduler {
                         kind: TrialKind::Control,
                         event: None,
                         seed_tier: None,
+                        discovered_ttl: None,
                     },
                 }
             }
@@ -162,6 +169,7 @@ impl Scheduler {
                     kind: TrialKind::Exploit,
                     event: None,
                     seed_tier: None,
+                    discovered_ttl: None,
                 },
                 Some(sid) => Assignment {
                     id: Some(sid),
@@ -169,6 +177,7 @@ impl Scheduler {
                     kind: TrialKind::Exploit,
                     event: None,
                     seed_tier: None,
+                    discovered_ttl: None,
                 },
             },
             NetPhase::Discover => {
@@ -182,6 +191,7 @@ impl Scheduler {
                         kind: TrialKind::Explore,
                         event: None,
                         seed_tier: Some(tier),
+                        discovered_ttl: None,
                     }
                 } else {
                     match gen.next_candidate(&skip, &accept) {
@@ -191,6 +201,7 @@ impl Scheduler {
                             kind: TrialKind::Explore,
                             event: None,
                             seed_tier: None,
+                            discovered_ttl: None,
                         },
                         None => {
                             // Nothing to hand out. Either every candidate is
@@ -210,6 +221,7 @@ impl Scheduler {
                                     kind: TrialKind::Control,
                                     event: Some(DiscoveryEvent::Exhausted { tried }),
                                     seed_tier: None,
+                                    discovered_ttl: None,
                                 }
                             } else {
                                 Assignment {
@@ -218,6 +230,7 @@ impl Scheduler {
                                     kind: TrialKind::Control,
                                     event: None,
                                     seed_tier: None,
+                                    discovered_ttl: None,
                                 }
                             }
                         }
@@ -230,12 +243,17 @@ impl Scheduler {
                 kind: TrialKind::Control,
                 event: None,
                 seed_tier: None,
+                discovered_ttl: None,
             },
         };
 
         if revived.is_some() {
             a.event = revived;
         }
+        // Set once, here, rather than per match arm above: every branch shares
+        // the same target, so its measured injector distance (if any) always
+        // applies, whichever branch produced the assignment.
+        a.discovered_ttl = ts.injector_hops;
         ts.mark_assigned(a.id, now);
         a
     }
@@ -295,6 +313,14 @@ impl Scheduler {
         let fail = verdict::is_failure(outcome);
         if !ok && !fail {
             return DiscoveryEvent::Noted; // Inconclusive
+        }
+
+        // Set once, like server_initial_ttl: the first clean DPI-reset
+        // fingerprint for this target is kept for the rest of the session.
+        if ts.injector_hops.is_none() {
+            if let Some(hops) = timing.injector_hops {
+                ts.injector_hops = Some(hops);
+            }
         }
 
         if let Some(sid) = id {

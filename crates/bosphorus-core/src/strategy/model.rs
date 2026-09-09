@@ -112,10 +112,22 @@ pub enum OverlapFill {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TtlPolicy {
-    /// Fixed value, from a user override.
+    /// Fixed value, from a user override. Always wins — never overridden by a
+    /// [`Discovered`](TtlPolicy::Discovered) measurement.
     UserFixed(u8),
-    /// `clamp(hops_to_server - delta, min, max)`. Seeds the M7 TTL search.
+    /// `clamp(hops_to_server - delta, min, max)`. The blind default: a guess at
+    /// how much closer the censor's middlebox sits than the real server,
+    /// before anything about this specific path has been measured.
     AutoHeuristic { delta: u8, min: u8, max: u8 },
+    /// A precisely measured TTL: hops from the client to the actual injecting
+    /// middlebox, read off a `DpiReset`/`LateReset` packet's own TTL (see
+    /// `conntrack::events::guess_hops` and `TargetState::injector_hops`). Used
+    /// directly, no `delta` guess needed — `resolve_ttl` substitutes this for
+    /// an `AutoHeuristic` policy at the point of use ([`build_fake`
+    /// ](crate::strategy::transforms::fake_packet::build_fake)) once a target
+    /// has one; never baked into a grid-generated `Strategy` (so it never
+    /// changes a `StrategyId`).
+    Discovered(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +250,10 @@ impl Strategy {
                         put(delta);
                         put(min);
                         put(max);
+                    }
+                    Some(TtlPolicy::Discovered(v)) => {
+                        put(3);
+                        put(v);
                     }
                 }
                 match f.payload {
