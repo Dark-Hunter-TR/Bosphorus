@@ -7,7 +7,7 @@
 //! once it exists, target eviction).
 //!
 //! Run the same command on the pre-change and post-change binary and diff the
-//! two blocks; that is the "öncesi / sonrası" comparison for Adım #4.
+//! two blocks; that is the before/after comparison for the eviction step.
 
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ pub fn run(n: usize) -> anyhow::Result<()> {
     engine.persist_now();
     report(&engine, "after fill");
 
-    // Far-future tick: forces the idle flow sweep and (Adım #4.3) eviction.
+    // Far-future tick: forces the idle flow sweep and target eviction.
     let future = Instant::now() + Duration::from_secs(48 * 3600);
     for _ in 0..3 {
         engine.tick(future);
