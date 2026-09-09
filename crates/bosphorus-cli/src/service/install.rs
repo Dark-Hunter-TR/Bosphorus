@@ -90,9 +90,10 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
         .map_err(super::map_scm_err)?;
 
     let _ = svc.set_description(super::SERVICE_DISPLAY);
-    if !opts.start_demand {
-        let _ = svc.set_delayed_auto_start(true);
-    }
+    // Plain AutoStart, not delayed: Windows holds a delayed-auto-start
+    // service back ~1-2 minutes after boot to avoid competing with more
+    // critical services, but a DPI bypass should be intercepting before the
+    // user's other apps start making blocked connections, not after.
     let _ = svc.update_failure_actions(ServiceFailureActions {
         reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(86_400)),
         reboot_msg: None,
