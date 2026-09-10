@@ -56,14 +56,7 @@ and a CLI that can also install itself as a Windows Service.
 
 ## How it works, in short
 
-```mermaid
-flowchart LR
-    A[Watch the first packet] --> B{Site blocked?}
-    B -->|No| C[Nothing to do]
-    B -->|Yes| D[Try ~166 packet tricks]
-    D --> E[One wins twice in a row]
-    E --> F[Lock it in & remember per network]
-```
+![The five-step flow: watch the first packet, detect whether the site is blocked, search about 166 packet tricks, lock in the one that wins twice in a row, and remember it per network](docs/diagrams/how-it-works-en.svg)
 
 1. **Watch.** The very first packet of an HTTPS connection — the `ClientHello`,
    which carries the site's name in plain text — is let through untouched, and
@@ -145,16 +138,7 @@ never becomes a target.
 
 A target moves through four phases:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Probe
-    Probe --> Active: success
-    Probe --> Discover: reset / blackhole
-    Discover --> Active: 2 wins in a row
-    Active --> Discover: 3 losses in a row
-    Discover --> Exhausted: all candidates tried
-    Exhausted --> Discover: bigger grid ships
-```
+![The discovery state machine: Probe moves to Active on success or to Discover on a reset or blackhole; Discover promotes to Active after 2 wins in a row and Active falls back to Discover after 3 losses in a row; Discover moves to Exhausted once all candidates are tried, and a bigger grid revives it back to Discover](docs/diagrams/discovery-lifecycle-en.svg)
 
 1. **Probe** — the first connection to a new site passes through unchanged, to
    see whether it's actually blocked. A success moves it to **Active** with no

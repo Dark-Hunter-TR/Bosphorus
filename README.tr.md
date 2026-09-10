@@ -56,14 +56,7 @@ bir CLI.
 
 ## Kısaca nasıl çalışır
 
-```mermaid
-flowchart LR
-    A[İlk paketi izle] --> B{Site engelli mi?}
-    B -->|Hayır| C[Yapılacak bir şey yok]
-    B -->|Evet| D[~166 paket hilesini dene]
-    D --> E[Biri art arda iki kez kazanır]
-    E --> F[Kilitle ve ağa göre hatırla]
-```
+![Beş adımlı akış: ilk paketi izle, sitenin engelli olup olmadığını tespit et, yaklaşık 166 paket hilesini dene, art arda iki kez kazananı kilitle, ve ağa göre hatırla](docs/diagrams/how-it-works-tr.svg)
 
 1. **İzle.** Bir HTTPS bağlantısının ilk paketi — site adını açık metin olarak
    taşıyan `ClientHello` — dokunulmadan geçirilir ve Bosphorus karşılığında ne
@@ -146,16 +139,7 @@ dokunulmaz ve asla hedef olmaz.
 
 Bir hedef dört fazdan geçer:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Probe
-    Probe --> Active: başarı
-    Probe --> Discover: reset / blackhole
-    Discover --> Active: art arda 2 başarı
-    Active --> Discover: art arda 3 başarısızlık
-    Discover --> Exhausted: tüm adaylar denendi
-    Exhausted --> Discover: daha büyük grid gelirse
-```
+![Keşif durum makinesi: Probe, başarıda Active'e, reset veya blackhole'da Discover'a geçer; Discover art arda 2 başarıdan sonra Active'e terfi eder, Active art arda 3 başarısızlıktan sonra Discover'a düşer; Discover tüm adaylar denendiğinde Exhausted'a geçer, daha büyük bir grid onu tekrar Discover'a döndürür](docs/diagrams/discovery-lifecycle-tr.svg)
 
 1. **Probe** — yeni bir siteye ilk bağlantı, gerçekten engelli olup olmadığını
    görmek için değiştirilmeden geçer. Başarı, hedefi strateji gerektirmeden
