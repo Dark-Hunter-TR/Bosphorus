@@ -13,15 +13,15 @@
 <rect x="55.0" y="400" width="210" height="64" rx="12" fill="#2f6feb"/>
 <text text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="17" font-weight="600" fill="#ffffff"><tspan x="160.0" y="437.4">Exhausted</tspan></text>
 <line x1="273.0" y1="76" x2="96.0" y2="170" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="178.5" y="117.0">reset /</tspan><tspan x="178.5" y="132.6">blackhole</tspan></text>
+<text text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="178.5" y="117.0">DpiReset /</tspan><tspan x="178.5" y="132.6">Blackhole</tspan></text>
 <line x1="387.0" y1="76" x2="564.0" y2="170" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="start" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="481.5" y="117.0">success</tspan></text>
+<text text-anchor="start" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="481.5" y="117.0">Success</tspan></text>
 <line x1="260.0" y1="194.0" x2="400.0" y2="194.0" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="330.0" y="182.0">2 wins in a row</tspan></text>
+<text text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="330.0" y="174.0">2× Success</tspan><tspan x="330.0" y="189.6">(consecutive)</tspan></text>
 <line x1="400.0" y1="230.0" x2="260.0" y2="230.0" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="330.0" y="250.0">3 losses in a row</tspan></text>
+<text text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="330.0" y="252.0">3× Failure</tspan><tspan x="330.0" y="267.6">(consecutive)</tspan></text>
 <line x1="120.0" y1="250" x2="120.0" y2="400" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="106.0" y="325.0">all candidates</tspan><tspan x="106.0" y="340.6">tried</tspan></text>
+<text text-anchor="end" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="106.0" y="325.0">Grid exhausted</tspan></text>
 <line x1="200.0" y1="400" x2="200.0" y2="250" stroke="#7d8590" stroke-width="2" marker-end="url(#arrow)"/>
-<text text-anchor="start" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="214.0" y="325.0">bigger grid</tspan><tspan x="214.0" y="340.6">ships</tspan></text>
+<text text-anchor="start" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" fill="#7d8590"><tspan x="214.0" y="325.0">Larger grid</tspan><tspan x="214.0" y="340.6">ships</tspan></text>
 </svg>
