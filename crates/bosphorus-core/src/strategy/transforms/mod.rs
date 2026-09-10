@@ -20,6 +20,10 @@ pub struct TransformCtx<'a> {
     pub meta: &'a CaptureMeta,
     /// Hops to the server from the SYN-ACK, for `AutoHeuristic` TTL.
     pub hops_to_server: Option<u8>,
+    /// This target's measured injector distance, if discovery has one yet
+    /// (see [`crate::strategy::model::TtlPolicy::Discovered`]). Substitutes
+    /// for an `AutoHeuristic` fake-packet TTL; never for `UserFixed`.
+    pub discovered_ttl: Option<u8>,
     /// Cap each emitted segment's TCP payload at this many bytes (MSS).
     pub max_seg: usize,
 }
@@ -88,7 +92,7 @@ pub fn apply_strategy(
     let mut fakes: Vec<(Vec<u8>, ChecksumOp)> = Vec::new();
     if let Some(fs) = &strat.fake {
         for _ in 0..fs.repeats.max(1) {
-            fakes.push(fake_packet::build_fake(fs, &view, ctx.hops_to_server)?);
+            fakes.push(fake_packet::build_fake(fs, &view, ctx.hops_to_server, ctx.discovered_ttl)?);
         }
     }
 
@@ -259,7 +263,7 @@ mod tests {
             tls_pad: Some(512),
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
@@ -287,7 +291,7 @@ mod tests {
         let strat =
             Strategy { fake: None, fragment: None, order: SendOrder::FakeThenReal, tls_pad: Some(512) };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
@@ -315,7 +319,7 @@ mod tests {
             tls_pad: Some(512),
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(10), max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(10), discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
         assert_eq!(out.len(), 3, "fake + 2 real segments");
@@ -342,7 +346,7 @@ mod tests {
             tls_pad: Some(512),
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         assert!(apply_strategy(&strat, &ctx, &mut SendBatch::new()).is_err());
     }
 
@@ -354,7 +358,7 @@ mod tests {
         let payload = view.payload().to_vec();
 
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(11), max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(11), discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         let disp = apply_strategy(&Strategy::m4_fixed(), &ctx, &mut out).unwrap();
 
@@ -404,7 +408,7 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
@@ -442,7 +446,7 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 
@@ -474,7 +478,7 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 
@@ -500,7 +504,7 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta::default();
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         assert!(apply_strategy(&strat, &ctx, &mut SendBatch::new()).is_err());
     }
 
@@ -520,7 +524,7 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, max_seg: 1200 };
+        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 

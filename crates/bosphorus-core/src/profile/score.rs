@@ -158,12 +158,20 @@ mod tests {
     fn note_only_touches_quality_on_success() {
         let mut s = ScoredStrategy::new(Strategy::m4_fixed());
         let t = Instant::now();
-        s.note(false, t, VerdictTiming { latency: Some(Duration::from_millis(50)), retx: 0 });
+        s.note(
+            false,
+            t,
+            VerdictTiming { latency: Some(Duration::from_millis(50)), retx: 0, injector_hops: None },
+        );
         assert_eq!(s.trials, 1);
         assert_eq!(s.successes, 0);
         assert_eq!(s.quality, StrategyQuality::default(), "failed trial leaves quality untouched");
 
-        s.note(true, t, VerdictTiming { latency: Some(Duration::from_millis(80)), retx: 0 });
+        s.note(
+            true,
+            t,
+            VerdictTiming { latency: Some(Duration::from_millis(80)), retx: 0, injector_hops: None },
+        );
         assert_eq!(s.successes, 1);
         assert_eq!(s.quality.retx_free_successes, 1);
         assert_eq!(s.quality.min_latency, Some(Duration::from_millis(80)));

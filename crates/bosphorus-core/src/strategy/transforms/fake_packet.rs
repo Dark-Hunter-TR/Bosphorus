@@ -1,7 +1,7 @@
 use crate::error::CoreError;
 use crate::packet::{add_padding_extension, PacketBuilder, PacketView};
 use crate::source_sink::ChecksumOp;
-use crate::strategy::model::{FakePayload, FakeSpec};
+use crate::strategy::model::{FakePayload, FakeSpec, TtlPolicy};
 use crate::strategy::transforms::ttl::resolve_ttl;
 
 /// GoodbyeDPI's static fake TLS ClientHello, verbatim from
@@ -68,10 +68,16 @@ fn add_delta(v: u32, d: i32) -> u32 {
 
 /// Build one fake packet from `orig` (an outbound ClientHello). Returns the
 /// packet bytes and the checksum handling the engine must apply.
+///
+/// `discovered_ttl` is the target's measured injector distance (see
+/// [`TtlPolicy::Discovered`]), if this target has one yet. It substitutes for
+/// an `AutoHeuristic` policy — a real measurement beats the blind guess — but
+/// never for `UserFixed`, which is an explicit override and always wins.
 pub fn build_fake(
     spec: &FakeSpec,
     orig: &PacketView<'_>,
     hops_to_server: Option<u8>,
+    discovered_ttl: Option<u8>,
 ) -> Result<(Vec<u8>, ChecksumOp), CoreError> {
     let payload: Vec<u8> = match spec.payload {
         FakePayload::StaticClientHello => FAKE_HTTPS_REQUEST.to_vec(),
@@ -96,6 +102,10 @@ pub fn build_fake(
 
     if parts.set_ttl {
         let policy = spec.ttl.ok_or(CoreError::Parse("fake: TtlLimited needs a ttl policy"))?;
+        let policy = match (policy, discovered_ttl) {
+            (TtlPolicy::AutoHeuristic { .. }, Some(measured)) => TtlPolicy::Discovered(measured),
+            _ => policy,
+        };
         let ttl = resolve_ttl(&policy, hops_to_server)
             .ok_or(CoreError::Parse("fake: ttl policy unresolved (no SYN-ACK hop count yet)"))?;
         b.set_ttl(ttl);
@@ -163,7 +173,7 @@ mod tests {
             payload: FakePayload::AggressiveClientHello,
             repeats: 1,
         };
-        let (fake, op) = build_fake(&s, &v, None).unwrap();
+        let (fake, op) = build_fake(&s, &v, None, None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
         assert_eq!(fv.payload().len(), FAKE_HTTPS_REQUEST.len() + 4 + AGGRESSIVE_PAD_EXTRA as usize);
         assert_eq!(fv.tcp_seq(), Some(1_000_000 - 10_000));
@@ -177,6 +187,7 @@ mod tests {
         let (fake, op) = build_fake(
             &spec(DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA }, None),
             &v,
+            None,
             None,
         )
         .unwrap();
@@ -192,7 +203,7 @@ mod tests {
     fn wrong_checksum_flags_break_op() {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
-        let (fake, op) = build_fake(&spec(DesyncMethod::WrongChecksum, None), &v, None).unwrap();
+        let (fake, op) = build_fake(&spec(DesyncMethod::WrongChecksum, None), &v, None, None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
         assert_eq!(fv.tcp_seq(), Some(1)); // no shift
         assert_eq!(op, ChecksumOp::RecomputeThenBreakTcp);
@@ -203,7 +214,7 @@ mod tests {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
         let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
-        let (fake, op) = build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11)).unwrap();
+        let (fake, op) = build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
         assert_eq!(fv.ttl(), 7); // 11 - 4
         assert_eq!(op, ChecksumOp::Recompute);
@@ -214,7 +225,36 @@ mod tests {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
         let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
-        assert!(build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, None).is_err());
+        assert!(build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, None, None).is_err());
+    }
+
+    #[test]
+    fn discovered_ttl_overrides_the_auto_heuristic() {
+        let v = clienthello_pkt(1, 1, 64);
+        let v = PacketView::parse(&v).unwrap();
+        let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
+        // Heuristic alone: 11 - 4 = 7.
+        let (fake, _) = build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
+        assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 7);
+        // A measured injector distance of 2 hops wins outright — no delta, no
+        // dependence on `hops_to_server` at all (irrelevant here, still Some(11)).
+        let (fake, _) =
+            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), Some(2)).unwrap();
+        assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 2);
+        // Even with no hop count at all, a measured value alone is enough.
+        let (fake, _) =
+            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, None, Some(2)).unwrap();
+        assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 2);
+    }
+
+    #[test]
+    fn discovered_ttl_never_overrides_a_user_fixed_policy() {
+        let v = clienthello_pkt(1, 1, 64);
+        let v = PacketView::parse(&v).unwrap();
+        let p = TtlPolicy::UserFixed(9);
+        let (fake, _) =
+            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), Some(2)).unwrap();
+        assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 9, "explicit override always wins");
     }
 
     #[test]
@@ -227,6 +267,7 @@ mod tests {
             &spec(DesyncMethod::SeqPlusTtl { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA }, Some(p)),
             &v,
             None,
+            None,
         )
         .unwrap();
         let v1 = PacketView::parse(&f1).unwrap();
@@ -234,7 +275,7 @@ mod tests {
         assert_eq!(v1.ttl(), 5);
         assert_eq!(o1, ChecksumOp::Recompute);
 
-        let (_f2, o2) = build_fake(&spec(DesyncMethod::ChecksumPlusTtl, Some(p)), &v, None).unwrap();
+        let (_f2, o2) = build_fake(&spec(DesyncMethod::ChecksumPlusTtl, Some(p)), &v, None, None).unwrap();
         assert_eq!(o2, ChecksumOp::RecomputeThenBreakTcp);
     }
 }
