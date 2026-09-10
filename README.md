@@ -7,7 +7,7 @@ Bosphorus watches your outbound HTTPS connections, automatically works out which
 packet trick defeats the censor on *your* network for *each* site, locks that
 trick in, and remembers it per network — with zero manual tuning.
 
-**Languages:** **English** · [Türkçe](README.tr.md) · [Русский](README.ru.md) · [中文](README.zh.md) · [فارسی](README.fa.md)
+**Languages:** **English** · [Türkçe](README.tr.md) · [Русский](README.ru.md)
 
 > ⚠️ **Legal note.** Bosphorus is a network-research and censorship-circumvention
 > tool. Use it only on networks and traffic you are authorised to test. You are
@@ -55,6 +55,15 @@ It ships as a Rust workspace: a portable core engine, a thin WinDivert wrapper,
 and a CLI that can also install itself as a Windows Service.
 
 ## How it works, in short
+
+```mermaid
+flowchart LR
+    A[Watch the first packet] --> B{Site blocked?}
+    B -->|No| C[Nothing to do]
+    B -->|Yes| D[Try ~166 packet tricks]
+    D --> E[One wins twice in a row]
+    E --> F[Lock it in & remember per network]
+```
 
 1. **Watch.** The very first packet of an HTTPS connection — the `ClientHello`,
    which carries the site's name in plain text — is let through untouched, and
@@ -135,6 +144,17 @@ name (SNI) from the `ClientHello`. A handshake with no readable site name
 never becomes a target.
 
 A target moves through four phases:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Probe
+    Probe --> Active: success
+    Probe --> Discover: reset / blackhole
+    Discover --> Active: 2 wins in a row
+    Active --> Discover: 3 losses in a row
+    Discover --> Exhausted: all candidates tried
+    Exhausted --> Discover: bigger grid ships
+```
 
 1. **Probe** — the first connection to a new site passes through unchanged, to
    see whether it's actually blocked. A success moves it to **Active** with no

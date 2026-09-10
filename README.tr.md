@@ -7,7 +7,7 @@ Bosphorus, giden HTTPS bağlantılarınızı izler, *sizin* ağınızda *her* si
 sansürü yenen paket hilesini otomatik olarak bulur, o hileyi kilitler ve ağ
 bazında hatırlar — elle hiçbir ayar yapmadan.
 
-**Diller:** [English](README.md) · **Türkçe** · [Русский](README.ru.md) · [中文](README.zh.md) · [فارسی](README.fa.md)
+**Diller:** [English](README.md) · **Türkçe** · [Русский](README.ru.md)
 
 > ⚠️ **Yasal not.** Bosphorus bir ağ araştırma ve sansür atlatma aracıdır.
 > Yalnızca test etme yetkiniz olan ağlarda ve trafikte kullanın. Size
@@ -55,6 +55,15 @@ bir WinDivert sarmalayıcısı ve kendini Windows Hizmeti olarak da kurabilen
 bir CLI.
 
 ## Kısaca nasıl çalışır
+
+```mermaid
+flowchart LR
+    A[İlk paketi izle] --> B{Site engelli mi?}
+    B -->|Hayır| C[Yapılacak bir şey yok]
+    B -->|Evet| D[~166 paket hilesini dene]
+    D --> E[Biri art arda iki kez kazanır]
+    E --> F[Kilitle ve ağa göre hatırla]
+```
 
 1. **İzle.** Bir HTTPS bağlantısının ilk paketi — site adını açık metin olarak
    taşıyan `ClientHello` — dokunulmadan geçirilir ve Bosphorus karşılığında ne
@@ -136,6 +145,17 @@ handshake (zaten parçalanmış, ya da Şifreli Client Hello kullanan) asla
 dokunulmaz ve asla hedef olmaz.
 
 Bir hedef dört fazdan geçer:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Probe
+    Probe --> Active: başarı
+    Probe --> Discover: reset / blackhole
+    Discover --> Active: art arda 2 başarı
+    Active --> Discover: art arda 3 başarısızlık
+    Discover --> Exhausted: tüm adaylar denendi
+    Exhausted --> Discover: daha büyük grid gelirse
+```
 
 1. **Probe** — yeni bir siteye ilk bağlantı, gerçekten engelli olup olmadığını
    görmek için değiştirilmeden geçer. Başarı, hedefi strateji gerektirmeden
