@@ -25,6 +25,7 @@ trick in, and remembers it per network — with zero manual tuning.
   - [The discovery lifecycle](#the-discovery-lifecycle)
   - [Per-network memory (NetKey)](#per-network-memory-netkey)
   - [ISP seed pool](#isp-seed-pool---isp-name-opt-in)
+  - [QUIC and HTTP/3](#quic-and-http3)
   - [Live network switching](#live-network-switching)
 - [The evasion toolbox](#the-evasion-toolbox)
 - [The discovery grid](#the-discovery-grid)
@@ -205,13 +206,48 @@ tag, before the untried grid.
 - The tag is whatever you choose to call it — Bosphorus never infers your ISP
   itself. Getting it "wrong" only ever costs one wasted trial.
 
+### QUIC and HTTP/3
+
+Everything above works on TLS over TCP. A modern browser, though, will often
+reach a site over **QUIC** instead — and a censor that blocks the site usually
+blocks it there too. The browser then sits on a protocol Bosphorus cannot help
+it with, and the site stays broken even though a working TCP strategy has
+already been learned.
+
+There is no equivalent trick to play on a QUIC handshake: the site name inside
+it is encrypted, so there is nothing to split, shadow, or shift. What Bosphorus
+does instead is **refuse the QUIC attempt**, which makes the browser fall back
+to TCP — the path it *does* have an answer for.
+
+Who that applies to is the whole point:
+
+| `--quic` | What happens |
+|---|---|
+| `blocked` *(default)* | Only destinations where a censor was actually caught resetting a connection lose HTTP/3. Everything else keeps it. |
+| `all` | Every HTTP/3 connection on the machine is refused — GoodbyeDPI's approach. No learning needed; costs QUIC everywhere. |
+| `off` | QUIC is never touched. A blocked site may keep failing over HTTP/3. |
+
+Under the default, a destination is marked only by a **real reset** (`DpiReset`
+or `LateReset`) seen on the TCP side — silence isn't proof, since it is
+indistinguishable from ordinary packet loss. Marks expire on their own after
+about fifteen minutes, so a network that stops censoring gets HTTP/3 back
+without anything being restarted, and they are kept per network and never
+written to disk, because an address learned behind a CDN belongs to someone
+else soon enough.
+
+The unit here is an address, not a hostname, because a QUIC handshake carries
+no readable name. A blocked host sharing a CDN address with allowed ones
+therefore costs those hosts HTTP/3 too — they fall back to TCP and keep
+working, just without QUIC's speed advantage.
+
 ### Live network switching
 
 Roaming Wi-Fi, toggling a VPN, or renewing a DHCP lease all trigger a
 recheck. After a short debounce, Bosphorus recomputes the NetKey; if it
 changed, the old network's learned state is flushed to its own file, the new
 network's file is loaded (if one exists), and stale connection state is
-cleared — with no restart and no dropped traffic in between.
+cleared — with no restart and no dropped traffic in between. What the old
+network's censor was caught doing is dropped with it.
 
 ## The evasion toolbox
 
@@ -349,13 +385,15 @@ A Cargo workspace of three crates:
 bosphorus <command> [options]
 ```
 
-**`--engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR] [--isp NAME]`**
+**`--engine [--secs N] [--strategy S] [--enable-overlap] [--quic P] [--profile-dir DIR] [--isp NAME]`**
 *Needs Administrator.* Runs the engine. With no `--strategy`, this is full
 auto-discovery with per-network persistence and live network-switch
 handling. With `--strategy`, it forces one fixed strategy instead (not tied
 to any network, not saved). `--secs N` stops automatically after N seconds —
 otherwise, stop it with `Ctrl+C`. `--profile-dir` overrides where profiles
 are read and written. `--isp NAME` opts into the [ISP seed pool](#isp-seed-pool---isp-name-opt-in).
+`--quic off|blocked|all` picks the [QUIC policy](#quic-and-http3) (default
+`blocked`).
 
 **`--check-filters`**
 *No elevation needed.* Builds the WinDivert filter strings and checks their
@@ -431,7 +469,7 @@ bosphorus --engine --strategy grid:0              # whatever the first grid entr
 ```powershell
 # Install: creates and starts the "Bosphorus" service (LocalSystem,
 # auto-start, restart-on-failure). Checks the driver loads first.
-bosphorus service install [--lang en|tr] [--enable-overlap]
+bosphorus service install [--lang en|tr] [--enable-overlap] [--quic P]
                           [--profile-dir <path>] [--install-dir <path>]
                           [--start auto|demand] [--force]
 
@@ -503,10 +541,10 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 - **Windows only**, and only TLS-over-TCP on port 443. Plain HTTP and TLS on
   other ports aren't handled.
-- **QUIC/HTTP-3** traffic is currently passed through untouched — the
-  detection filter exists but isn't wired into the running engine yet. If a
-  censor blocks a site over QUIC too, a browser may still fail there until
-  it falls back to TCP.
+- **QUIC/HTTP-3 is refused, not bypassed.** Bosphorus can push a blocked site
+  back onto TCP (see [the QUIC policy](#quic-and-http3)), where it does have a
+  strategy — but it has no evasion strategies for QUIC itself, because the name
+  inside a QUIC handshake is encrypted and there is nothing to split or shadow.
 - **DNS** redirection isn't implemented yet; DNS-based blocking is only
   observable, not corrected.
 - **IP-layer fragmentation** was evaluated and deliberately shelved (too

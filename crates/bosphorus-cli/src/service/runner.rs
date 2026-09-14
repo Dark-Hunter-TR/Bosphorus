@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use bosphorus_core::config::QuicPolicy;
 use bosphorus_core::{filter, Engine, EvasionConfig, NetKeyFn, ProfilePaths, StopFlag};
 use bosphorus_divert::{compile_filter, Layer, OpenFlags, WinDivertHandle};
 use windows_service::service::{
@@ -36,7 +37,7 @@ fn service_main(arguments: Vec<OsString>) {
 }
 
 fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
-    let (lang, enable_overlap, profile_dir) = parse_args(&arguments);
+    let ServiceArgs { lang, enable_overlap, quic, profile_dir } = parse_args(&arguments);
     crate::i18n::set(lang);
     let _guard = crate::logging::init(crate::logging::LogSink::ServiceFile { dir: super::logs_dir() });
 
@@ -82,7 +83,7 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
     let _ = std::fs::create_dir_all(&profile_dir);
     let (human, key) = crate::netkey::compute();
 
-    let mut cfg = EvasionConfig { enable_overlap_disorder: enable_overlap, ..Default::default() };
+    let mut cfg = EvasionConfig { enable_overlap_disorder: enable_overlap, quic, ..Default::default() };
     cfg.profile = Some(ProfilePaths { dir: profile_dir, net_key: key });
 
     let filters = filter::build(&cfg).map_err(|e| anyhow::anyhow!("filter build: {e}"))?;
@@ -102,6 +103,17 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
         }
     };
     let _ = hslot.set(Arc::clone(&handle));
+
+    // `--quic all` only. A failure here is not fatal: the TCP bypass is the
+    // service's actual job, and it should not refuse to run because the
+    // secondary blanket-block handle could not be opened.
+    let _quic_block = match crate::engine_cmd::open_quic_block(&filters) {
+        Ok(h) => h,
+        Err(e) => {
+            eventlog::error(eventlog::ID_OPEN_FAILED, &format!("{e}; continuing without it"));
+            None
+        }
+    };
 
     let provider: NetKeyFn = Arc::new(crate::netkey::compute);
     let engine = Arc::new(Engine::with_live_netkey(cfg, provider));
@@ -145,14 +157,39 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_args(args: &[OsString]) -> (crate::i18n::Lang, bool, Option<PathBuf>) {
+/// What the SCM passes us — the argv `service install` stored.
+pub struct ServiceArgs {
+    pub lang: crate::i18n::Lang,
+    pub enable_overlap: bool,
+    pub quic: QuicPolicy,
+    pub profile_dir: Option<PathBuf>,
+}
+
+fn parse_args(args: &[OsString]) -> ServiceArgs {
     let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let lang = pos_value(&s, "--lang")
         .and_then(crate::i18n::parse)
         .unwrap_or(crate::i18n::Lang::En);
-    let enable_overlap = s.iter().any(|a| a == "--enable-overlap");
-    let profile_dir = pos_value(&s, "--profile-dir").map(PathBuf::from);
-    (lang, enable_overlap, profile_dir)
+    // Unlike the interactive CLI, a bad value here must not stop the service
+    // from starting: this argv was written by our own installer, so a bad one
+    // is our bug, and refusing to start would take the user's whole bypass down
+    // over a spelling. The Event Log keeps the breadcrumb.
+    let quic = match pos_value(&s, "--quic") {
+        Some(v) => v.parse().unwrap_or_else(|e| {
+            eventlog::error(
+                eventlog::ID_BAD_ARGUMENT,
+                &format!("{e}; falling back to {}", QuicPolicy::default().as_str()),
+            );
+            QuicPolicy::default()
+        }),
+        None => QuicPolicy::default(),
+    };
+    ServiceArgs {
+        lang,
+        enable_overlap: s.iter().any(|a| a == "--enable-overlap"),
+        quic,
+        profile_dir: pos_value(&s, "--profile-dir").map(PathBuf::from),
+    }
 }
 
 fn pos_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -170,32 +207,43 @@ mod tests {
 
     #[test]
     fn parse_args_defaults_to_en_no_overlap_no_dir() {
-        let (lang, overlap, dir) = parse_args(&argv(&["service", "run"]));
-        assert_eq!(lang, Lang::En);
-        assert!(!overlap);
-        assert!(dir.is_none());
+        let a = parse_args(&argv(&["service", "run"]));
+        assert_eq!(a.lang, Lang::En);
+        assert!(!a.enable_overlap);
+        assert!(a.profile_dir.is_none());
+        assert_eq!(a.quic, QuicPolicy::default());
     }
 
     #[test]
-    fn parse_args_reads_lang_overlap_and_profile_dir() {
-        let (lang, overlap, dir) = parse_args(&argv(&[
+    fn parse_args_reads_lang_overlap_quic_and_profile_dir() {
+        let a = parse_args(&argv(&[
             "service",
             "run",
             "--lang",
             "tr",
             "--enable-overlap",
+            "--quic",
+            "all",
             "--profile-dir",
             r"C:\pd",
         ]));
-        assert_eq!(lang, Lang::Tr);
-        assert!(overlap);
-        assert_eq!(dir, Some(PathBuf::from(r"C:\pd")));
+        assert_eq!(a.lang, Lang::Tr);
+        assert!(a.enable_overlap);
+        assert_eq!(a.quic, QuicPolicy::All);
+        assert_eq!(a.profile_dir, Some(PathBuf::from(r"C:\pd")));
     }
 
     #[test]
     fn parse_args_unknown_lang_falls_back_to_en() {
-        let (lang, _, _) = parse_args(&argv(&["service", "run", "--lang", "xx"]));
-        assert_eq!(lang, Lang::En);
+        assert_eq!(parse_args(&argv(&["service", "run", "--lang", "xx"])).lang, Lang::En);
+    }
+
+    #[test]
+    fn an_unreadable_quic_policy_keeps_the_service_starting() {
+        // Refusing to start would take the whole bypass down over a bad token
+        // in argv we wrote ourselves.
+        let a = parse_args(&argv(&["service", "run", "--quic", "sometimes"]));
+        assert_eq!(a.quic, QuicPolicy::default());
     }
 
     #[test]

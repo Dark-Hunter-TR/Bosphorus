@@ -54,6 +54,17 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
     let mut main = format!(
         "(tcp and !impostor and !loopback {maxpayload} and ({inbound} or {outbound}))"
     );
+    if cfg.quic.wants_selective_capture() {
+        // The engine decides per destination, so these have to be captured
+        // rather than dropped in the driver.
+        main.push_str(" or ");
+        main.push_str(
+            &t::QUIC_SELECTIVE_FMT
+                .replace("{dst_ports}", &port_clause(ports, "udp.DstPort"))
+                .replace("{v4dst}", t::NO_LOCALNETS_V4_DST)
+                .replace("{v6dst}", t::NO_LOCALNETS_V6_DST),
+        );
+    }
     if cfg.dns_upstream.is_some() {
         // GoodbyeDPI appends the UDP clause after the whole `(tcp ...)` group.
         main.push_str(" or ");
@@ -61,7 +72,7 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
     }
 
     let main = CString::new(main).map_err(|_| CoreError::Filter("main filter has interior NUL".into()))?;
-    let quic_drop = if cfg.quic_drop_enabled() {
+    let quic_drop = if cfg.quic.wants_blanket_drop() {
         Some(CString::new(t::QUIC_DROP).map_err(|_| CoreError::Filter("quic filter has interior NUL".into()))?)
     } else {
         None
@@ -73,6 +84,7 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::QuicPolicy;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn count(s: &str, ch: char) -> usize {
@@ -84,7 +96,7 @@ mod tests {
         let f = build(&EvasionConfig::default()).unwrap();
         let s = f.main.to_str().unwrap();
         assert_eq!(count(s, '('), count(s, ')'), "main: {s}");
-        assert!(f.quic_drop.is_some());
+        assert!(f.quic_drop.is_none(), "selective QUIC needs capture, not a drop handle");
     }
 
     #[test]
@@ -94,7 +106,37 @@ mod tests {
         assert!(s.contains(t::NO_LOCALNETS_V6_DST));
         assert!(s.contains("tcp.Payload[0] == 0x16"));
         assert!(s.contains("tcp.PayloadLength < 1200")); // {n} substituted
-        assert!(!s.contains(" or (udp")); // no DNS clause by default
+        assert!(!s.contains("udp.SrcPort == 53")); // no DNS clause by default
+    }
+
+    #[test]
+    fn selective_quic_is_captured_by_the_main_filter() {
+        let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
+        assert!(s.contains("udp.DstPort == 443"));
+        assert!(s.contains("udp.PayloadLength >= 1200"));
+        assert!(s.contains("udp.Payload[0] >= 0xC0"));
+        assert!(
+            !s.contains("udp.Payload32[1b]"),
+            "the version pin would miss QUIC v2 and the drafts"
+        );
+        assert_eq!(count(&s, '('), count(&s, ')'));
+    }
+
+    #[test]
+    fn quic_off_touches_neither_the_filter_nor_the_drop_handle() {
+        let cfg = EvasionConfig { quic: QuicPolicy::Off, ..Default::default() };
+        let f = build(&cfg).unwrap();
+        let s = f.main.to_str().unwrap();
+        assert!(!s.contains("udp"), "no UDP capture at all: {s}");
+        assert!(f.quic_drop.is_none());
+    }
+
+    #[test]
+    fn quic_all_drops_in_the_driver_instead_of_capturing() {
+        let cfg = EvasionConfig { quic: QuicPolicy::All, ..Default::default() };
+        let f = build(&cfg).unwrap();
+        assert!(!f.main.to_str().unwrap().contains("udp"));
+        assert_eq!(f.quic_drop.unwrap().into_string().unwrap(), t::QUIC_DROP);
     }
 
     #[test]
@@ -108,14 +150,6 @@ mod tests {
         assert_eq!(count(&s, '('), count(&s, ')'));
     }
 
-    #[test]
-    fn quic_drop_suppressed_when_disabled() {
-        let cfg = EvasionConfig {
-            quic_drop: Some(false),
-            ..Default::default()
-        };
-        assert!(build(&cfg).unwrap().quic_drop.is_none());
-    }
 
     #[test]
     fn default_filter_covers_the_cloudflare_https_alt_ports() {

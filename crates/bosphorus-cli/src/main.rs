@@ -1,14 +1,17 @@
 //! Bosphorus CLI.
 //!
-//! M5 build:
 //!   --selftest                       WinDivert verification harness (V1-V4)
 //!   --passthru [--secs N]            raw capture/log/reinject demo
 //!   --check-filters                  build + syntax-check the filter strings
-//!   --engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR] [--isp NAME]   run the core engine
+//!   --engine [--secs N] [--strategy S] [--enable-overlap] [--quic P] [--profile-dir DIR] [--isp NAME]   run the core engine
 //!
 //! `--enable-overlap` opts auto-discovery into the `OverlapDisorder` candidates
 //! (OFF by default — overlap can break a handshake on a first-received-wins
 //! server). `--strategy overlap:<seqovl>/<anchor>` works regardless.
+//!
+//! `--quic off|blocked|all` decides what happens to HTTP/3; `blocked` (the
+//! default) refuses it only towards destinations a censor was caught
+//! interfering with, so those sites fall back to TCP where a strategy exists.
 //!
 //! `--strategy` grammar:
 //!   list | grid:<i> | overlap:<seqovl>/<anchor> | <frag>[/<desync>]
@@ -45,7 +48,7 @@ pub(crate) fn usage() {
     eprintln!("    bosphorus --selftest-m7          overlap/disorder feasibility (V-A/V-B/V-C)");
     eprintln!("    bosphorus --passthru [--secs N]");
     eprintln!("    bosphorus --check-filters");
-    eprintln!("    bosphorus --engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR] [--isp NAME]");
+    eprintln!("    bosphorus --engine [--secs N] [--strategy S] [--enable-overlap] [--quic P] [--profile-dir DIR] [--isp NAME]");
     eprintln!("    bosphorus --discovery-demo       no-elevation proof of the discovery loop");
     eprintln!("    bosphorus --mem-bench [N]        no-elevation RAM footprint probe (N synthetic targets)");
     eprintln!("    bosphorus --observe [--secs N]   analysis: log ALL TCP+UDP (no mutation)");
@@ -57,6 +60,10 @@ pub(crate) fn usage() {
     eprintln!("                            d    = wrongseq|wrongsum|ttl:<u8>|none  (default wrongseq)");
     eprintln!("  --strategy overlap:<sq>/<anchor>   forced OverlapDisorder (disorder + seqovl)");
     eprintln!("  --enable-overlap         opt auto-discovery into OverlapDisorder (default OFF)");
+    eprintln!("  --quic off|blocked|all   HTTP/3 handling (default: blocked). blocked refuses QUIC");
+    eprintln!("                           only towards destinations caught being censored, so those");
+    eprintln!("                           sites fall back to TCP where a strategy exists; all refuses");
+    eprintln!("                           every QUIC connection; off leaves HTTP/3 alone");
     eprintln!("  --profile-dir DIR        read/write discovery profiles here instead of");
     eprintln!("                           %LOCALAPPDATA%\\Bosphorus\\profiles (e.g. the service's");
     eprintln!("                           %ProgramData%\\Bosphorus\\profiles store)");
@@ -73,6 +80,17 @@ fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
         .position(|a| a == key)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+/// Resolve `--quic off|blocked|all`, defaulting to the selective policy. A
+/// misspelling is an error rather than a silent fallback: quietly running a
+/// different QUIC policy than asked for is exactly the kind of surprise that
+/// looks like the engine misbehaving.
+fn parse_quic(args: &[String]) -> anyhow::Result<bosphorus_core::config::QuicPolicy> {
+    match value_after(args, "--quic") {
+        Some(v) => v.parse().map_err(|e| anyhow::anyhow!("{e}")),
+        None => Ok(bosphorus_core::config::QuicPolicy::default()),
+    }
 }
 
 /// Resolve the UI language: `--lang` > `BOSPHORUS_LANG` > Windows UI language
@@ -139,6 +157,7 @@ fn main() -> anyhow::Result<()> {
     let enable_overlap = args.iter().any(|a| a == "--enable-overlap");
     let profile_dir = value_after(&args, "--profile-dir").map(std::path::PathBuf::from);
     let isp = value_after(&args, "--isp").map(str::to_owned);
+    let quic = parse_quic(&args)?;
 
     match args.first().map(String::as_str) {
         Some("service") => service::dispatch(&args),
@@ -152,18 +171,26 @@ fn main() -> anyhow::Result<()> {
             mem_bench::run(n)
         }
         Some("--observe") => observe::run(secs.unwrap_or(60)),
-        Some("--engine") => match value_after(&args, "--strategy") {
-            None => finish(engine_cmd::run_engine(secs, None, enable_overlap, profile_dir, isp)),
-            Some(spec) => match engine_cmd::parse_strategy(spec, enable_overlap)? {
-                StrategyArg::List => {
-                    engine_cmd::list_grid(enable_overlap);
-                    Ok(())
-                }
-                StrategyArg::One(s) => {
-                    finish(engine_cmd::run_engine(secs, Some(s), enable_overlap, profile_dir, isp))
-                }
-            },
-        },
+        Some("--engine") => {
+            let opts = |strategy| engine_cmd::EngineOpts {
+                secs,
+                strategy,
+                enable_overlap,
+                profile_dir: profile_dir.clone(),
+                isp: isp.clone(),
+                quic,
+            };
+            match value_after(&args, "--strategy") {
+                None => finish(engine_cmd::run_engine(opts(None))),
+                Some(spec) => match engine_cmd::parse_strategy(spec, enable_overlap)? {
+                    StrategyArg::List => {
+                        engine_cmd::list_grid(enable_overlap);
+                        Ok(())
+                    }
+                    StrategyArg::One(s) => finish(engine_cmd::run_engine(opts(Some(s)))),
+                },
+            }
+        }
         None => launcher::run(),
         _ => {
             usage();

@@ -5,10 +5,12 @@
 //! parser's API across versions.
 
 mod builder;
+pub mod quic;
 mod tls;
 mod view;
 
 pub use builder::PacketBuilder;
+pub use quic::is_connection_attempt as is_quic_connection_attempt;
 pub use tls::{
     add_padding_extension, find_sni, looks_like_client_hello, looks_like_server_hello,
     tls_content_type, SniLocation,

@@ -3,6 +3,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use bosphorus_core::config::QuicPolicy;
 use bosphorus_core::{filter, EvasionConfig};
 use bosphorus_divert::{compile_filter, Layer};
 
@@ -10,8 +11,37 @@ use bosphorus_divert::{compile_filter, Layer};
 fn default_filters_compile() {
     let f = filter::build(&EvasionConfig::default()).expect("build");
     compile_filter(&f.main, Layer::Network).expect("main filter accepted");
-    compile_filter(f.quic_drop.as_ref().expect("quic present"), Layer::Network)
-        .expect("quic-drop filter accepted");
+}
+
+/// Every policy's filter, including the selective QUIC clause the engine needs
+/// captured and the blanket drop clause only `all` opens.
+#[test]
+fn every_quic_policy_produces_filters_windivert_accepts() {
+    for policy in [QuicPolicy::Off, QuicPolicy::Blocked, QuicPolicy::All] {
+        let cfg = EvasionConfig { quic: policy, ..Default::default() };
+        let f = filter::build(&cfg).expect("build");
+        compile_filter(&f.main, Layer::Network)
+            .unwrap_or_else(|e| panic!("main filter for {policy:?} rejected: {e:?}"));
+        if let Some(q) = &f.quic_drop {
+            compile_filter(q, Layer::Network)
+                .unwrap_or_else(|e| panic!("quic-drop filter for {policy:?} rejected: {e:?}"));
+        }
+    }
+}
+
+/// The selective clause has to reach the engine, so a missing piece here is a
+/// silently disabled feature rather than a loud failure.
+#[test]
+fn the_selective_quic_clause_is_present_and_version_agnostic() {
+    let f = filter::build(&EvasionConfig::default()).expect("build");
+    let s = f.main.to_str().unwrap();
+    assert!(s.contains("udp.DstPort == 443"), "no QUIC capture: {s}");
+    assert!(s.contains("udp.PayloadLength >= 1200"));
+    assert!(
+        !s.contains("udp.Payload32[1b]"),
+        "pinning the version would miss QUIC v2 and the drafts"
+    );
+    assert!(f.quic_drop.is_none(), "selective mode must not also blanket-drop");
 }
 
 #[test]

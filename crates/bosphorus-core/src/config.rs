@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::error::CoreError;
 use crate::strategy::model::{DesyncMethod, FragmentSpec};
 
 /// Where discovery profiles are persisted (M8). `None` in [`EvasionConfig`]
@@ -48,9 +49,8 @@ pub struct EvasionConfig {
     /// (only poisoning detection is logged).
     pub dns_upstream: Option<IpAddr>,
 
-    /// `Some(true)` = always drop QUIC, `Some(false)` = never, `None` = default
-    /// (drop-on). Consumed by the QUIC-drop handle in M9.
-    pub quic_drop: Option<bool>,
+    /// What to do about HTTP/3. See [`QuicPolicy`].
+    pub quic: QuicPolicy,
 
     /// Connection-tracking / verdict timing.
     pub conntrack: ConntrackTuning,
@@ -87,7 +87,7 @@ impl Default for EvasionConfig {
             max_payload_filter: 1200,
             tls_ports: DEFAULT_TLS_PORTS.to_vec(),
             dns_upstream: None,
-            quic_drop: None,
+            quic: QuicPolicy::default(),
             conntrack: ConntrackTuning::default(),
             discovery: DiscoveryTuning::default(),
             network: NetworkTuning::default(),
@@ -125,10 +125,66 @@ impl EvasionConfig {
     }
 }
 
-impl EvasionConfig {
-    /// Whether the QUIC-drop handle should be opened for this config.
-    pub fn quic_drop_enabled(&self) -> bool {
-        self.quic_drop.unwrap_or(true)
+/// How the engine treats HTTP/3.
+///
+/// A site blocked over TLS-on-TCP is normally blocked over QUIC too, and a
+/// browser that has QUIC available will keep trying it — so the learned TCP
+/// strategy never gets its turn and the site stays broken. Refusing the QUIC
+/// attempt hands the browser back to TCP, where a strategy exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuicPolicy {
+    /// Never touch QUIC. HTTP/3 works normally, including to blocked sites,
+    /// which may fail there with no fallback.
+    Off,
+    /// Refuse QUIC only towards destinations conntrack has caught a censor
+    /// interfering with. Everywhere else HTTP/3 is untouched.
+    ///
+    /// The unit is an address, not a hostname, because a QUIC Initial carries
+    /// no readable name. A blocked host sharing a CDN address with allowed
+    /// hosts therefore costs those hosts HTTP/3 too — they fall back to TCP and
+    /// keep working, just without QUIC's head-of-line-blocking win.
+    #[default]
+    Blocked,
+    /// Refuse every QUIC connection attempt, the way GoodbyeDPI's passive block
+    /// does. Costs HTTP/3 across the machine; needs no learning to work.
+    All,
+}
+
+impl QuicPolicy {
+    /// Whether the blanket `WINDIVERT_FLAG_DROP` handle should be opened.
+    pub fn wants_blanket_drop(self) -> bool {
+        matches!(self, QuicPolicy::All)
+    }
+
+    /// Whether QUIC datagrams must reach [`crate::Engine::process`] for a
+    /// per-destination decision.
+    pub fn wants_selective_capture(self) -> bool {
+        matches!(self, QuicPolicy::Blocked)
+    }
+
+    /// The spelling accepted on the command line and written into the service's
+    /// stored arguments.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuicPolicy::Off => "off",
+            QuicPolicy::Blocked => "blocked",
+            QuicPolicy::All => "all",
+        }
+    }
+}
+
+impl std::str::FromStr for QuicPolicy {
+    type Err = CoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Ok(QuicPolicy::Off),
+            "blocked" | "auto" => Ok(QuicPolicy::Blocked),
+            "all" => Ok(QuicPolicy::All),
+            other => Err(CoreError::Config(format!(
+                "unknown --quic value {other:?} (expected off, blocked or all)"
+            ))),
+        }
     }
 }
 
@@ -233,5 +289,41 @@ impl Default for NetworkTuning {
             netkey_debounce: Duration::from_secs(5),
             min_rebind_interval: Duration::from_secs(30),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quic_policy_round_trips_through_its_command_line_spelling() {
+        for p in [QuicPolicy::Off, QuicPolicy::Blocked, QuicPolicy::All] {
+            assert_eq!(p.as_str().parse::<QuicPolicy>().unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn quic_policy_parsing_is_forgiving_about_case_and_spacing() {
+        assert_eq!(" OFF ".parse::<QuicPolicy>().unwrap(), QuicPolicy::Off);
+        assert_eq!("Blocked".parse::<QuicPolicy>().unwrap(), QuicPolicy::Blocked);
+        assert_eq!("auto".parse::<QuicPolicy>().unwrap(), QuicPolicy::Blocked);
+        assert_eq!("none".parse::<QuicPolicy>().unwrap(), QuicPolicy::Off);
+    }
+
+    #[test]
+    fn an_unknown_quic_policy_names_the_accepted_values() {
+        let e = "sometimes".parse::<QuicPolicy>().unwrap_err().to_string();
+        assert!(e.contains("off"), "{e}");
+        assert!(e.contains("blocked"), "{e}");
+        assert!(e.contains("all"), "{e}");
+    }
+
+    #[test]
+    fn the_default_policy_captures_rather_than_blanket_dropping() {
+        let p = QuicPolicy::default();
+        assert_eq!(p, QuicPolicy::Blocked);
+        assert!(p.wants_selective_capture());
+        assert!(!p.wants_blanket_drop());
     }
 }

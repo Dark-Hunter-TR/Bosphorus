@@ -60,6 +60,14 @@ pub enum Msg {
     HintElevated,
     HintDriverColocated,
 
+    // --- QUIC policy (M9) ---
+    /// `--quic all`: every HTTP/3 attempt on the machine is refused.
+    QuicBlockAll,
+    /// `--quic blocked` (the default): only censored destinations lose HTTP/3.
+    QuicBlockSelective,
+    /// `--quic off`: HTTP/3 is left alone entirely.
+    QuicOff,
+
     // --- service (4a) ---
     NeedAdmin,
     SvcRunNotFromConsole,
@@ -125,6 +133,15 @@ pub fn t(m: Msg) -> &'static str {
 
         (En, HintDriverColocated) => " — WinDivert64.sys is not in the same folder as WinDivert.dll",
         (Tr, HintDriverColocated) => " — WinDivert64.sys, WinDivert.dll ile aynı klasörde değil",
+
+        (En, QuicBlockAll) => "QUIC: every HTTP/3 connection is refused, so everything falls back to TCP",
+        (Tr, QuicBlockAll) => "QUIC: tüm HTTP/3 bağlantıları reddediliyor, her şey TCP'ye düşecek",
+
+        (En, QuicBlockSelective) => "QUIC: HTTP/3 is refused only for sites a censor was caught interfering with",
+        (Tr, QuicBlockSelective) => "QUIC: HTTP/3 yalnızca sansürlendiği tespit edilen siteler için reddediliyor",
+
+        (En, QuicOff) => "QUIC: left untouched (a blocked site may keep failing over HTTP/3)",
+        (Tr, QuicOff) => "QUIC: hiç dokunulmuyor (engelli bir site HTTP/3 üzerinden açılmamaya devam edebilir)",
 
         (En, NeedAdmin) => "This command needs an elevated (Administrator) console.",
         (Tr, NeedAdmin) => "Bu komut yönetici (Administrator) konsol gerektirir.",
@@ -248,6 +265,13 @@ pub fn err_windivert_open(e: &str, hint: &str) -> String {
     match get() {
         Lang::En => format!("WinDivertOpen failed: {e}{hint}"),
         Lang::Tr => format!("WinDivertOpen başarısız: {e}{hint}"),
+    }
+}
+
+pub fn err_quic_block_open(e: &str) -> String {
+    match get() {
+        Lang::En => format!("could not open the QUIC-block handle: {e}"),
+        Lang::Tr => format!("QUIC engelleme tutacağı açılamadı: {e}"),
     }
 }
 

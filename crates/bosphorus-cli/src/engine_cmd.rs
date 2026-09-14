@@ -10,6 +10,7 @@ use bosphorus_core::strategy::{
     DefaultGenerator, DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder,
     SplitAnchor, Strategy, TtlPolicy, ACK_DELTA, SEQ_DELTA,
 };
+use bosphorus_core::config::QuicPolicy;
 use bosphorus_core::{filter, Engine, EvasionConfig, NetKeyFn, ProfilePaths, StopFlag};
 use bosphorus_divert::{compile_filter, DivertError, Layer, OpenFlags, Param, WinDivertHandle};
 
@@ -411,6 +412,10 @@ pub fn check_filters() -> anyhow::Result<()> {
 
     for (label, cfg) in [
         ("default", EvasionConfig::default()),
+        // Every shipped filter string gets checked, not just the ones today's
+        // defaults happen to build.
+        ("quic=off", EvasionConfig { quic: QuicPolicy::Off, ..Default::default() }),
+        ("quic=all", EvasionConfig { quic: QuicPolicy::All, ..Default::default() }),
         (
             "dns-upstream=9.9.9.9",
             EvasionConfig {
@@ -457,15 +462,54 @@ fn init_tracing() {
         .try_init();
 }
 
-pub fn run_engine(
-    secs: Option<u64>,
-    strategy: Option<Strategy>,
-    enable_overlap: bool,
-    profile_dir_override: Option<PathBuf>,
-    isp: Option<String>,
-) -> anyhow::Result<()> {
+/// Open the blanket QUIC-block handle, if this run's policy asked for one.
+///
+/// `WINDIVERT_FLAG_DROP` means the driver discards every match without queueing
+/// it, so nothing is ever received from this handle — keeping it alive *is* the
+/// block. Shared by `--engine` and the service.
+pub fn open_quic_block(filters: &filter::Filters) -> anyhow::Result<Option<WinDivertHandle>> {
+    let Some(f) = filters.quic_drop.as_ref() else {
+        return Ok(None);
+    };
+    let h = WinDivertHandle::open(f.as_c_str(), Layer::Network, 0, OpenFlags::new().drop())
+        .map_err(|e| anyhow::anyhow!("{}", crate::i18n::err_quic_block_open(&e.to_string())))?;
+    Ok(Some(h))
+}
+
+/// The one-line summary of what this run does about HTTP/3.
+pub fn quic_policy_line(policy: QuicPolicy) -> &'static str {
+    crate::i18n::t(match policy {
+        QuicPolicy::Off => crate::i18n::Msg::QuicOff,
+        QuicPolicy::Blocked => crate::i18n::Msg::QuicBlockSelective,
+        QuicPolicy::All => crate::i18n::Msg::QuicBlockAll,
+    })
+}
+
+/// Everything `--engine` accepts. A struct rather than positional arguments
+/// because the flags are mostly `bool`/`Option` and a call site reads as
+/// `(None, None, false, None, None)` otherwise.
+#[derive(Debug, Default)]
+pub struct EngineOpts {
+    /// Stop automatically after this many seconds (`--secs`).
+    pub secs: Option<u64>,
+    /// Force one strategy instead of running discovery (`--strategy`).
+    pub strategy: Option<Strategy>,
+    /// Admit `OverlapDisorder` candidates (`--enable-overlap`).
+    pub enable_overlap: bool,
+    /// Override where profiles are read and written (`--profile-dir`).
+    pub profile_dir: Option<PathBuf>,
+    /// Opt into the cross-network seed pool under this tag (`--isp`).
+    pub isp: Option<String>,
+    /// How to treat HTTP/3 (`--quic`).
+    pub quic: QuicPolicy,
+}
+
+pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
+    let EngineOpts { secs, strategy, enable_overlap, profile_dir: profile_dir_override, isp, quic } =
+        opts;
     init_tracing();
     let mut cfg = cfg_for(enable_overlap);
+    cfg.quic = quic;
 
     // Persistence: discovery runs only (forced `--strategy` runs stay in-memory).
     let mut profile_src = None;
@@ -524,6 +568,7 @@ pub fn run_engine(
                 engine.set_isp_pool(std::sync::Arc::new(pool));
             }
         }
+        println!("  {}", quic_policy_line(quic));
         if enable_overlap {
             println!("{}", crate::i18n::t(crate::i18n::Msg::OverlapEnabledWarning));
         }
@@ -556,6 +601,11 @@ pub fn run_engine(
     // by the queue filling faster than our recv loop drains it.
     let _ = h.set_param(Param::QueueLength, 16_384);
     let _ = h.set_param(Param::QueueTime, 8_000);
+
+    // `QuicPolicy::All` only: a second handle whose matches the driver discards
+    // outright, so the blanket block costs nothing per packet. Held for the run;
+    // the selective policy needs no handle because its packets arrive on `h`.
+    let _quic_block = open_quic_block(&filters)?;
 
     let (maj, min) = h.version().unwrap_or((0, 0));
     println!("WinDivert {maj}.{min}");

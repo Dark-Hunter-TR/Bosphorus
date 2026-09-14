@@ -18,6 +18,8 @@ pub const ID_OPEN_FAILED: u32 = 1002;
 pub const ID_NET_CHANGED: u32 = 1003;
 pub const ID_GRID_EXHAUSTED: u32 = 1004;
 pub const ID_PANIC: u32 = 1005;
+/// A stored service argument could not be read; the default was used instead.
+pub const ID_BAD_ARGUMENT: u32 = 1006;
 
 pub const SOURCE_NAME: &str = "Bosphorus";
 
