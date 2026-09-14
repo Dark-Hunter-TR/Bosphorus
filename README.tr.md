@@ -25,6 +25,7 @@ bazında hatırlar — elle hiçbir ayar yapmadan.
   - [Keşif yaşam döngüsü](#keşif-yaşam-döngüsü)
   - [Ağ bazında hafıza (NetKey)](#ağ-bazında-hafıza-netkey)
   - [ISS tohum havuzu](#iss-tohum-havuzu---isp-name-opt-in)
+  - [QUIC ve HTTP/3](#quic-ve-http3)
   - [Canlı ağ değişimi](#canlı-ağ-değişimi)
 - [Atlatma araç kutusu](#atlatma-araç-kutusu)
 - [Keşif gridi](#keşif-gridi)
@@ -208,6 +209,40 @@ grid'den önce sunar.
 - Etiket, ona ne isim vermeyi seçtiğinizdir — Bosphorus ISS'nizi asla kendi
   başına çıkarmaz. "Yanlış" etiketlemek en fazla bir israf denemeye mal olur.
 
+### QUIC ve HTTP/3
+
+Yukarıdaki her şey TCP üzerindeki TLS için geçerlidir. Ancak modern bir
+tarayıcı bir siteye çoğu zaman **QUIC** üzerinden ulaşır — ve siteyi
+engelleyen bir sansürcü genellikle orayı da engeller. Tarayıcı böylece
+Bosphorus'un yardım edemeyeceği bir protokolde takılı kalır ve çalışan bir
+TCP stratejisi çoktan öğrenilmiş olsa bile site açılmaz.
+
+Bir QUIC el sıkışmasında oynanacak eşdeğer bir oyun yoktur: içindeki site
+adı şifrelidir, yani bölünecek, gölgelenecek ya da kaydırılacak bir şey
+yoktur. Bosphorus bunun yerine **QUIC denemesini reddeder**; bu da tarayıcıyı
+TCP'ye — yani cevabını *bildiği* yola — düşürür.
+
+Bunun kime uygulandığı ise işin bütün özüdür:
+
+| `--quic` | Ne olur |
+|---|---|
+| `blocked` *(varsayılan)* | Yalnızca bir sansürcünün gerçekten bağlantı sıfırladığı yakalanan hedefler HTTP/3'ü kaybeder. Diğer her şey onu korur. |
+| `all` | Makinedeki her HTTP/3 bağlantısı reddedilir — GoodbyeDPI'ın yaklaşımı. Öğrenme gerektirmez; QUIC'i her yerde kaybettirir. |
+| `off` | QUIC'e hiç dokunulmaz. Engelli bir site HTTP/3 üzerinden açılmamaya devam edebilir. |
+
+Varsayılanda bir hedef yalnızca TCP tarafında görülen **gerçek bir sıfırlama**
+(`DpiReset` ya da `LateReset`) ile işaretlenir — sessizlik kanıt değildir,
+çünkü sıradan paket kaybından ayırt edilemez. İşaretler yaklaşık on beş dakika
+sonra kendiliğinden düşer, böylece sansürü kesen bir ağ hiçbir şey yeniden
+başlatılmadan HTTP/3'ü geri kazanır; ayrıca ağ bazında tutulur ve diske hiç
+yazılmazlar, çünkü bir CDN arkasında öğrenilen adres yakında bir başkasına
+ait olur.
+
+Buradaki birim alan adı değil adrestir, çünkü bir QUIC el sıkışması okunabilir
+bir isim taşımaz. Dolayısıyla bir CDN adresini izinli sitelerle paylaşan
+engelli bir site, o sitelere de HTTP/3'e mal olur — onlar TCP'ye düşer ve
+çalışmaya devam eder, yalnızca QUIC'in hız avantajı olmadan.
+
 ### Canlı ağ değişimi
 
 Wi-Fi'de dolaşmak, bir VPN'i açıp kapatmak ya da bir DHCP kirasını
@@ -215,7 +250,8 @@ yenilemek bir yeniden kontrolü tetikler. Kısa bir bekleme (debounce)
 sonrasında Bosphorus NetKey'i yeniden hesaplar; değiştiyse, eski ağın
 öğrenilen durumu kendi dosyasına boşaltılır, yeni ağın dosyası (varsa)
 yüklenir ve eski bağlantı-takip durumu temizlenir — arada yeniden başlatma
-yok, kesilen trafik yok.
+yok, kesilen trafik yok. Eski ağın sansürcüsünün yakalanan davranışı da
+onunla birlikte düşer.
 
 ## Atlatma araç kutusu
 
@@ -354,7 +390,7 @@ Derlemenizin gönderdiği tam gridi yazdırmak için
 bosphorus <komut> [seçenekler]
 ```
 
-**`--engine [--secs N] [--strategy S] [--enable-overlap] [--profile-dir DIR] [--isp NAME]`**
+**`--engine [--secs N] [--strategy S] [--enable-overlap] [--quic P] [--profile-dir DIR] [--isp NAME]`**
 *Yönetici gerektirir.* Motoru çalıştırır. `--strategy` yoksa bu, ağ bazında
 kalıcılık ve canlı ağ-değişimi işleme ile tam otomatik keşiftir.
 `--strategy` ile bunun yerine tek bir sabit strateji zorlanır (hiçbir ağa
@@ -362,6 +398,8 @@ bağlı değil, kaydedilmez). `--secs N`, N saniye sonra otomatik durur —
 aksi hâlde `Ctrl+C` ile durdurun. `--profile-dir`, profillerin nereden
 okunup nereye yazılacağını geçersiz kılar. `--isp NAME`,
 [ISS tohum havuzuna](#iss-tohum-havuzu---isp-name-opt-in) opt-in yapar.
+`--quic off|blocked|all` ise [QUIC politikasını](#quic-ve-http3) seçer
+(varsayılan `blocked`).
 
 **`--check-filters`**
 *Yükseltme gerekmez.* WinDivert filtre dizgelerini kurar ve sözdizimlerini
@@ -442,7 +480,7 @@ bosphorus --engine --strategy grid:0              # ilk grid girdisi neyse
 # Kurulum: "Bosphorus" hizmetini oluşturur ve başlatır (LocalSystem,
 # otomatik başlangıç, hata sonrası yeniden başlatma). Önce sürücünün
 # yüklendiğini kontrol eder.
-bosphorus service install [--lang en|tr] [--enable-overlap]
+bosphorus service install [--lang en|tr] [--enable-overlap] [--quic P]
                           [--profile-dir <yol>] [--install-dir <yol>]
                           [--start auto|demand] [--force]
 
@@ -515,10 +553,11 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 - **Yalnızca Windows**, ve yalnızca 443 portunda TLS-üzeri-TCP. Düz HTTP ve
   başka portlardaki TLS işlenmez.
-- **QUIC/HTTP-3** trafiği şu an değiştirilmeden geçirilir — tespit filtresi
-  var ama henüz çalışan motora bağlanmadı. Bir sansürcü bir siteyi QUIC
-  üzerinden de engelliyorsa, tarayıcı TCP'ye geri dönene kadar orada hâlâ
-  başarısız olabilir.
+- **QUIC/HTTP-3 atlatılmaz, reddedilir.** Bosphorus engelli bir siteyi TCP'ye
+  geri düşürebilir ([QUIC politikası](#quic-ve-http3)) — orada bir stratejisi
+  vardır — ama QUIC'in kendisi için bir atlatma stratejisi yoktur, çünkü QUIC
+  el sıkışmasındaki isim şifrelidir ve bölünecek ya da gölgelenecek bir şey
+  kalmaz.
 - **DNS** yönlendirmesi henüz uygulanmadı; DNS bazlı engelleme yalnızca
   gözlemlenebilir, düzeltilmez.
 - **IP katmanı parçalama** değerlendirildi ve bilinçli olarak rafa

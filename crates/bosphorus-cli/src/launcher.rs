@@ -248,7 +248,7 @@ pub fn run() -> anyhow::Result<()> {
         ResolvedAction::Exit => Ok(()),
 
         ResolvedAction::RunEngineHere => {
-            let res = crate::engine_cmd::run_engine(None, None, false, None, None);
+            let res = crate::engine_cmd::run_engine(crate::engine_cmd::EngineOpts::default());
             pause();
             res
         }
@@ -284,6 +284,7 @@ fn install_opts() -> crate::service::install::Opts {
     crate::service::install::Opts {
         lang: i18n::get(),
         enable_overlap: false,
+        quic: bosphorus_core::config::QuicPolicy::default(),
         profile_dir: None,
         install_dir: None,
         start_demand: false,

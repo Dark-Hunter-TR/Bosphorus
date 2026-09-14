@@ -4,10 +4,12 @@
 //! to the network through the [`PacketSource`] / [`PacketSink`] traits, which a
 //! backend (currently WinDivert, in `bosphorus-cli`) implements.
 //!
-//! M2 scope: skeleton only — `Engine::process` always returns
-//! [`Decision::ForwardOriginal`] (observe, never mutate). Conntrack, strategy
-//! discovery, auto-TTL and DNS arrive in M3+.
+//! One captured packet flows through [`conntrack`] (raw packets to a verdict),
+//! [`discovery`] (verdict to the next candidate, or the strategy already proven
+//! for this target), and [`strategy::transforms`] (chosen strategy to the
+//! packets actually sent). [`profile`] persists what was learned, per network.
 
+pub mod censored;
 pub mod config;
 pub mod conntrack;
 pub mod discovery;
@@ -19,6 +21,7 @@ pub mod profile;
 mod source_sink;
 pub mod strategy;
 
+pub use censored::CensoredIps;
 pub use config::{ConntrackTuning, DiscoveryTuning, EvasionConfig, NetworkTuning, ProfilePaths};
 pub use conntrack::{FlowKey, FlowOutcome};
 pub use discovery::{Discovery, DiscoveryEvent, TargetSummary};

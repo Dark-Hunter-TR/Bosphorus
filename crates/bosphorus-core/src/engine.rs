@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 
-use crate::config::{EvasionConfig, ProfilePaths};
+use crate::censored::CensoredIps;
+use crate::config::{EvasionConfig, ProfilePaths, QuicPolicy};
 use crate::conntrack::{self, FlowKey, FlowOutcome, FlowTable};
 use crate::discovery::{Discovery, DiscoveryEvent, TargetSummary, VerdictTiming};
 use crate::error::CoreError;
@@ -75,6 +76,11 @@ pub type NetKeyFn = Arc<dyn Fn() -> (String, String) + Send + Sync>;
 /// per-packet path never sees a half-updated view.
 struct NetworkSession {
     discovery: Discovery,
+    /// Destinations this network's censor was caught interfering with, used to
+    /// decide which QUIC attempts to refuse. Scoped to the session because
+    /// interference is a property of the network, not of the host: the same
+    /// address can be censored on one network and clean on the next.
+    censored: CensoredIps,
     /// Where *this* network's profile lives. `None` = `nonet` (in-memory only,
     /// never persisted — a failed fingerprint must not pollute a real network's
     /// file).
@@ -108,7 +114,7 @@ fn build_session(
             ),
         }
     }
-    NetworkSession { discovery, profile, net_human }
+    NetworkSession { discovery, censored: CensoredIps::default(), profile, net_human }
 }
 
 pub struct Engine {
@@ -254,6 +260,15 @@ impl Engine {
         let Ok(view) = PacketView::parse(packet) else {
             return Decision::ForwardOriginal;
         };
+        let now = Instant::now();
+
+        // One consistent network session for this packet (a rebind on the tick
+        // thread swaps atomically; we never straddle two).
+        let session = self.session.load();
+
+        if view.is_udp() {
+            return self.decide_quic(&session.censored, &view, meta, now);
+        }
         if !view.is_tcp() {
             return Decision::ForwardOriginal;
         }
@@ -261,11 +276,6 @@ impl Engine {
             return Decision::ForwardOriginal;
         };
         let key = FlowKey::from_five_tuple(&ft, meta.outbound);
-        let now = Instant::now();
-
-        // One consistent network session for this packet (a rebind on the tick
-        // thread swaps atomically; we never straddle two).
-        let session = self.session.load();
 
         // --- connection tracking / verdict ---
         let verdict = self.flows.with_mut(key, now, |st| {
@@ -295,6 +305,7 @@ impl Engine {
                 injector_hops,
             };
             log_outcome(&key, name.as_deref(), outcome, "packet");
+            note_if_censored(&session.censored, &key, outcome, now);
             self.feed_discovery(&session.discovery, target.as_deref(), trial, outcome, timing);
         }
 
@@ -436,6 +447,41 @@ impl Engine {
         );
     }
 
+    /// Decide a captured UDP datagram. Only reached under
+    /// [`QuicPolicy::Blocked`] — the other policies keep UDP out of the capture
+    /// filter entirely, so this costs nothing when QUIC handling is off.
+    ///
+    /// Refusing the datagram is the whole mechanism: a client that gets no
+    /// answer to its Initials abandons HTTP/3 for the host and reconnects over
+    /// TCP, which is the path Bosphorus actually has a learned strategy for.
+    fn decide_quic(
+        &self,
+        censored: &CensoredIps,
+        view: &PacketView<'_>,
+        meta: &CaptureMeta,
+        now: Instant,
+    ) -> Decision {
+        if self.cfg.quic != QuicPolicy::Blocked || !meta.outbound {
+            return Decision::ForwardOriginal;
+        }
+        if !view.dst_port().is_some_and(|p| self.cfg.is_tls_port(p)) {
+            return Decision::ForwardOriginal;
+        }
+        if !crate::packet::is_quic_connection_attempt(view.payload()) {
+            return Decision::ForwardOriginal;
+        }
+        let dst = view.dst_ip();
+        if !censored.contains(&dst, now) {
+            return Decision::ForwardOriginal;
+        }
+        tracing::debug!(
+            target: "bosphorus::quic",
+            server_ip = %dst,
+            "refused a QUIC connection attempt to a censored destination; falling back to TCP"
+        );
+        Decision::DropOriginal
+    }
+
     fn feed_discovery(
         &self,
         discovery: &Discovery,
@@ -526,7 +572,7 @@ impl Engine {
         }
 
         self.progress_digest(&session.discovery, now);
-        self.maybe_evict(&session.discovery, now);
+        self.maybe_evict(&session, now);
         self.maybe_persist(&session, now);
         self.mem_digest(&session.discovery, now);
     }
@@ -620,7 +666,7 @@ impl Engine {
     /// Throttled eviction of stale / low-value discovery targets — the bound
     /// that keeps a 7/24 run from accumulating one `TargetState` per hostname
     /// ever contacted.
-    fn maybe_evict(&self, discovery: &Discovery, now: Instant) {
+    fn maybe_evict(&self, session: &NetworkSession, now: Instant) {
         {
             let mut last = self.evict_at.lock();
             if now.saturating_duration_since(*last) < EVICT_EVERY {
@@ -628,10 +674,11 @@ impl Engine {
             }
             *last = now;
         }
-        let dropped = discovery.evict(now);
+        let dropped = session.discovery.evict(now);
         if dropped > 0 {
             tracing::debug!(target: "bosphorus::discovery", dropped, "evicted stale targets");
         }
+        session.censored.sweep(now);
     }
 
     /// Throttled process-footprint digest: flow-table size + capacity, discovery
@@ -802,6 +849,17 @@ fn break_tcp_checksum(bytes: &mut [u8]) {
     if off + 2 <= bytes.len() {
         let c = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
         bytes[off..off + 2].copy_from_slice(&c.wrapping_sub(1).to_be_bytes());
+    }
+}
+
+/// Record the destination when a verdict is proof of an in-path censor.
+///
+/// Only the two reset verdicts qualify. A `Blackhole` is indistinguishable from
+/// ordinary packet loss, and treating one as proof would cost the destination
+/// its HTTP/3 over what may have been a dropped packet.
+fn note_if_censored(censored: &CensoredIps, key: &FlowKey, outcome: FlowOutcome, now: Instant) {
+    if matches!(outcome, FlowOutcome::DpiReset | FlowOutcome::LateReset) {
+        censored.note(key.server_ip, now);
     }
 }
 
@@ -1562,5 +1620,198 @@ mod tests {
             !engine.netkey_dirty.load(Ordering::Relaxed),
             "with no signal during, the flag clears"
         );
+    }
+
+    // --- QUIC -------------------------------------------------------------
+
+    /// Outbound UDP 10.0.0.5:50000 -> `dst`:443 carrying `payload`, padded to
+    /// the 1200 bytes a real QUIC Initial datagram has to reach.
+    fn quic_out(dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 17, 0, 0, 10, 0, 0, 5];
+        p.extend_from_slice(&dst);
+        p.extend_from_slice(&50_000u16.to_be_bytes());
+        p.extend_from_slice(&[0x01, 0xbb]); // 443
+        let udp_len = (8 + 1200) as u16;
+        p.extend_from_slice(&udp_len.to_be_bytes());
+        p.extend_from_slice(&[0, 0]); // checksum (unverified by PacketView)
+        let mut body = payload.to_vec();
+        body.resize(1200, 0);
+        p.extend_from_slice(&body);
+        let total = p.len() as u16;
+        p[2..4].copy_from_slice(&total.to_be_bytes());
+        p
+    }
+
+    /// A v1 Initial: long header, 8-byte DCID, empty SCID.
+    fn quic_initial() -> Vec<u8> {
+        let mut h = vec![0xC0];
+        h.extend_from_slice(&crate::packet::quic::VERSION_1.to_be_bytes());
+        h.push(8);
+        h.extend_from_slice(&[0xab; 8]);
+        h.push(0);
+        h
+    }
+
+    /// The address `ch_with_sni` / `inbound_rst` use.
+    const BLOCKED_DST: [u8; 4] = [93, 184, 216, 34];
+
+    /// Drive a target to a `DpiReset` verdict, which is what marks its address.
+    fn provoke_dpi_reset(engine: &Engine, host: &str, sport: u16) {
+        engine.process(&mut ch_with_sni(host, sport), &mut out_meta(), &mut SendBatch::new());
+        engine.process(&mut inbound_rst(sport), &mut in_meta(), &mut SendBatch::new());
+    }
+
+    #[test]
+    fn quic_to_a_destination_no_censor_touched_is_left_alone() {
+        let engine = Engine::new(EvasionConfig::default());
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn a_dpi_reset_over_tcp_makes_the_engine_refuse_quic_to_that_destination() {
+        let engine = Engine::new(EvasionConfig::default());
+        provoke_dpi_reset(&engine, "blocked.example", 40100);
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::DropOriginal,
+            "the browser has to fall back to TCP for the learned strategy to apply"
+        );
+    }
+
+    #[test]
+    fn only_the_censored_destination_loses_quic() {
+        let engine = Engine::new(EvasionConfig::default());
+        provoke_dpi_reset(&engine, "blocked.example", 40101);
+
+        let mut elsewhere = quic_out([1, 1, 1, 1], &quic_initial());
+        assert_eq!(
+            engine.process(&mut elsewhere, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn established_quic_traffic_to_a_censored_destination_still_flows() {
+        let engine = Engine::new(EvasionConfig::default());
+        provoke_dpi_reset(&engine, "blocked.example", 40102);
+
+        // A short header — a connection that is already up, which dropping
+        // would break outright rather than pushing towards TCP.
+        let mut short_header = quic_out(BLOCKED_DST, &[0x40, 0xab, 0xcd]);
+        assert_eq!(
+            engine.process(&mut short_header, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+
+        // Likewise a Handshake packet, which only exists mid-negotiation.
+        let mut handshake = quic_out(BLOCKED_DST, &{
+            let mut h = quic_initial();
+            h[0] = 0xE0;
+            h
+        });
+        assert_eq!(
+            engine.process(&mut handshake, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn the_off_policy_never_refuses_quic() {
+        let cfg = EvasionConfig { quic: QuicPolicy::Off, ..Default::default() };
+        let engine = Engine::new(cfg);
+        provoke_dpi_reset(&engine, "blocked.example", 40103);
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn the_all_policy_drops_in_the_driver_so_the_engine_stays_out_of_it() {
+        // `QuicPolicy::All` keeps UDP out of the capture filter entirely, so a
+        // datagram reaching `process` at all would be a bug in the wiring; the
+        // engine must not second-guess it either way.
+        let cfg = EvasionConfig { quic: QuicPolicy::All, ..Default::default() };
+        let engine = Engine::new(cfg);
+        provoke_dpi_reset(&engine, "blocked.example", 40104);
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn inbound_quic_is_never_refused() {
+        let engine = Engine::new(EvasionConfig::default());
+        provoke_dpi_reset(&engine, "blocked.example", 40105);
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut in_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn a_blackhole_alone_does_not_cost_a_destination_its_quic() {
+        // Silence is indistinguishable from packet loss, so it must not be
+        // treated as proof of a censor.
+        let engine = Engine::new(EvasionConfig::default());
+        let t0 = Instant::now();
+        engine.process(&mut ch_with_sni("quiet.example", 40106), &mut out_meta(), &mut SendBatch::new());
+        engine.tick(t0 + Duration::from_secs(30)); // verdict timeout -> Blackhole
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal
+        );
+    }
+
+    #[test]
+    fn rebinding_to_another_network_forgets_what_the_old_one_censored() {
+        let key = Arc::new(Mutex::new("keyA".to_string()));
+        let k2 = Arc::clone(&key);
+        let dir = std::env::temp_dir().join(format!("bosph-quic-rebind-{}", std::process::id()));
+        let cfg = EvasionConfig {
+            profile: Some(ProfilePaths { dir: dir.clone(), net_key: "keyA".into() }),
+            ..Default::default()
+        };
+        let engine = Engine::with_live_netkey(
+            cfg,
+            Arc::new(move || {
+                let k = k2.lock().clone();
+                (k.clone(), k)
+            }),
+        );
+
+        provoke_dpi_reset(&engine, "blocked.example", 40107);
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::DropOriginal
+        );
+
+        *key.lock() = "keyB".to_string();
+        engine.mark_netkey_dirty();
+        engine.tick(Instant::now() + Duration::from_secs(10));
+
+        let mut p = quic_out(BLOCKED_DST, &quic_initial());
+        assert_eq!(
+            engine.process(&mut p, &mut out_meta(), &mut SendBatch::new()),
+            Decision::ForwardOriginal,
+            "interference is a property of the network that was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

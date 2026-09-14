@@ -1,9 +1,11 @@
-//! `bosphorus service install [--lang en|tr] [--enable-overlap]
+//! `bosphorus service install [--lang en|tr] [--enable-overlap] [--quic P]
 //!    [--profile-dir <p>] [--install-dir <p>] [--start auto|demand] [--force]`
 
 use std::ffi::{CString, OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
+
+use bosphorus_core::config::QuicPolicy;
 
 use windows_service::service::{
     ServiceAccess, ServiceAction, ServiceActionType, ServiceErrorControl, ServiceFailureActions,
@@ -16,6 +18,7 @@ use bosphorus_divert::{DivertError, Layer, OpenFlags, WinDivertHandle};
 pub struct Opts {
     pub lang: crate::i18n::Lang,
     pub enable_overlap: bool,
+    pub quic: QuicPolicy,
     pub profile_dir: Option<PathBuf>,
     pub install_dir: Option<PathBuf>,
     pub start_demand: bool,
@@ -26,6 +29,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let opts = Opts {
         lang: crate::resolve_lang(args),
         enable_overlap: args.iter().any(|a| a == "--enable-overlap"),
+        quic: crate::parse_quic(args)?,
         profile_dir: value_after(args, "--profile-dir").map(PathBuf::from),
         install_dir: value_after(args, "--install-dir").map(PathBuf::from),
         start_demand: value_after(args, "--start").map(|s| s.eq_ignore_ascii_case("demand"))
@@ -125,6 +129,11 @@ fn build_launch_arguments(opts: &Opts) -> Vec<OsString> {
     if opts.enable_overlap {
         v.push("--enable-overlap".into());
     }
+    // Always written out, not just when non-default: the stored argv is what
+    // the service runs for years, and it should not silently change meaning if
+    // a later build moves the default.
+    v.push("--quic".into());
+    v.push(opts.quic.as_str().into());
     if let Some(p) = &opts.profile_dir {
         v.push("--profile-dir".into());
         v.push(p.clone().into_os_string());
@@ -211,6 +220,7 @@ mod tests {
         Opts {
             lang,
             enable_overlap,
+            quic: QuicPolicy::default(),
             profile_dir,
             install_dir: None,
             start_demand: false,
@@ -223,9 +233,9 @@ mod tests {
     }
 
     #[test]
-    fn launch_arguments_minimal_is_just_service_run_lang() {
+    fn launch_arguments_minimal_is_just_service_run_lang_and_quic() {
         let v = build_launch_arguments(&opts(Lang::En, false, None));
-        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en"]);
+        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en", "--quic", "blocked"]);
     }
 
     #[test]
@@ -233,7 +243,10 @@ mod tests {
         let v = build_launch_arguments(&opts(Lang::Tr, true, Some(PathBuf::from(r"C:\pd"))));
         assert_eq!(
             as_strings(&v),
-            ["service", "run", "--lang", "tr", "--enable-overlap", "--profile-dir", r"C:\pd"]
+            [
+                "service", "run", "--lang", "tr", "--enable-overlap", "--quic", "blocked",
+                "--profile-dir", r"C:\pd"
+            ]
         );
     }
 
@@ -241,7 +254,23 @@ mod tests {
     fn launch_arguments_omit_profile_dir_key_when_none() {
         let v = build_launch_arguments(&opts(Lang::En, true, None));
         assert!(!v.iter().any(|o| o == "--profile-dir"));
-        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en", "--enable-overlap"]);
+        assert_eq!(
+            as_strings(&v),
+            ["service", "run", "--lang", "en", "--enable-overlap", "--quic", "blocked"]
+        );
+    }
+
+    #[test]
+    fn the_quic_policy_is_pinned_into_the_stored_arguments() {
+        // Spelled out even at the default, so a later change of default can't
+        // silently repurpose an already-installed service.
+        for p in [QuicPolicy::Off, QuicPolicy::Blocked, QuicPolicy::All] {
+            let mut o = opts(Lang::En, false, None);
+            o.quic = p;
+            let v = as_strings(&build_launch_arguments(&o));
+            let i = v.iter().position(|a| a == "--quic").expect("--quic present");
+            assert_eq!(v[i + 1], p.as_str());
+        }
     }
 
     #[test]

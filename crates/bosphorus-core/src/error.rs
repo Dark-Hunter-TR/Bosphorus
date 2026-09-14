@@ -7,6 +7,8 @@ pub enum CoreError {
     ShortPacket,
     #[error("filter build: {0}")]
     Filter(String),
+    #[error("config: {0}")]
+    Config(String),
     /// The [`PacketSource`](crate::PacketSource) was shut down — normal loop exit.
     #[error("source shut down")]
     SourceShutdown,

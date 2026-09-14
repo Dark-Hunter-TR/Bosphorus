@@ -16,8 +16,26 @@ pub const NO_LOCALNETS_V6_DST: &str = "((ipv6.DstAddr > ::1) and (ipv6.DstAddr <
 
 pub const NO_LOCALNETS_V6_SRC: &str = "((ipv6.SrcAddr > ::1) and (ipv6.SrcAddr < 2001::0 or ipv6.SrcAddr > 2001:1::0) and (ipv6.SrcAddr < fc00::0 or ipv6.SrcAddr > fe00::0) and (ipv6.SrcAddr < fe80::0 or ipv6.SrcAddr > fec0::0) and (ipv6.SrcAddr < ff00::0 or ipv6.SrcAddr > ffff::0))";
 
-/// `FILTER_PASSIVE_BLOCK_QUIC` (goodbyedpi.c:82-84) — verbatim.
+/// `FILTER_PASSIVE_BLOCK_QUIC` (goodbyedpi.c:82-84) — verbatim. Used only for
+/// [`QuicPolicy::All`](crate::config::QuicPolicy::All), where the handle drops
+/// every match in the driver and the engine never sees the packets.
 pub const QUIC_DROP: &str = "outbound and !impostor and !loopback and udp and udp.DstPort == 443 and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0xC0 and udp.Payload32[1b] == 0x01";
+
+/// Ours, not GoodbyeDPI's: the capture clause for
+/// [`QuicPolicy::Blocked`](crate::config::QuicPolicy::Blocked), where the drop
+/// decision is per destination and therefore has to be made in the engine.
+///
+/// It deliberately drops GoodbyeDPI's `udp.Payload32[1b] == 0x01` version pin —
+/// that clause only matches QUIC v1, and both v2 (RFC 9369) and the draft
+/// versions still in the wild open connections exactly the same way.
+/// [`crate::packet::quic`] does the precise classification once a datagram is
+/// in hand; this clause only has to be cheap and not miss anything.
+///
+/// `PayloadLength >= 1200` is what makes that safe: a client must pad any
+/// datagram containing an Initial to at least 1200 bytes, so nothing that opens
+/// a connection can slip past, while the short packets of an established
+/// connection never reach the engine.
+pub const QUIC_SELECTIVE_FMT: &str = "(outbound and !impostor and !loopback and udp and {dst_ports} and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0xC0 and ({v4dst} or {v6dst}))";
 
 /// `maxpayloadsize_str` (goodbyedpi.c:242-245) — verbatim, with GoodbyeDPI's
 /// `%hu` replaced by the `{n}` placeholder. "GET " = 0x47455420,
