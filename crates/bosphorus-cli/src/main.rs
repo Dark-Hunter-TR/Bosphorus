@@ -36,10 +36,16 @@ mod service;
 
 use engine_cmd::StrategyArg;
 
-/// `CARGO_PKG_VERSION` of this binary (workspace-centralized in the root
-/// `Cargo.toml`'s `[workspace.package]`). Printed by `--version`/`-V` and
-/// echoed at the top of `usage()` so a bug report always carries it.
+/// This crate's own version — each crate in the workspace carries its own, so
+/// this is the number a release is named after and the one a user sees.
+/// Printed by `--version`/`-V` and echoed at the top of `usage()` so a bug
+/// report always carries it.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The engine's version, which moves independently of this binary's. Reported
+/// alongside it so a bug report distinguishes a CLI-only build from one that
+/// carries new discovery behaviour.
+pub(crate) const CORE_VERSION: &str = bosphorus_core::VERSION;
 
 pub(crate) fn usage() {
     eprintln!("bosphorus {VERSION}\n");
@@ -149,7 +155,7 @@ fn finish(result: anyhow::Result<()>) -> ! {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("bosphorus {VERSION}");
+        println!("bosphorus {VERSION} (core {CORE_VERSION})");
         return Ok(());
     }
     i18n::set(resolve_lang(&args));

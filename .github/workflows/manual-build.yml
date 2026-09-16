@@ -1,0 +1,202 @@
+name: manual build
+
+# Build on demand, choosing the version each crate carries.
+#
+# Every version box is optional: fill in only the crates you actually changed
+# and the rest keep the number they already have. A core-only fix can therefore
+# ship as core 0.2.0 while the CLI stays 0.1.0.
+#
+# `mode: test` builds and hands back a downloadable artifact and nothing else —
+# no commit, no tag, no Release — so a version can be tried out before it is
+# spent. `mode: release` commits the bumps, tags the CLI's version, and
+# publishes a Release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_version:
+        description: "bosphorus-core version (blank = leave unchanged)"
+        required: false
+        default: ""
+      divert_version:
+        description: "bosphorus-divert version (blank = leave unchanged)"
+        required: false
+        default: ""
+      cli_version:
+        description: "bosphorus-cli version — names the release (blank = leave unchanged)"
+        required: false
+        default: ""
+      mode:
+        description: "test = artifact only; release = commit, tag and publish"
+        type: choice
+        options: [test, release]
+        default: test
+
+env:
+  WINDIVERT_VERSION: 2.2.2
+  WINDIVERT_ASSET: WinDivert-2.2.2-A.zip
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write # release mode pushes the bumps and the tag
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      # A prebuilt cargo-edit, so the version edit is done by the tool that
+      # exists for it rather than by regexing Cargo.toml in a shell step.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # `cargo set-version -p <crate>` rewrites that crate's version and the
+      # matching Cargo.lock entry, leaving every other crate and every
+      # third-party dependency alone. A blank input skips the crate entirely.
+      #
+      # It refuses to move a version backwards, which is deliberate: a release
+      # that renumbers downwards is nearly always a typo. A test build that
+      # trips over this costs nothing — every run starts from a fresh checkout,
+      # so a number typed into a test build never sticks to the repository.
+      - name: Apply the requested versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $semver = '^\d+\.\d+\.\d+([-+][0-9A-Za-z.\-]+)?$'
+          $wanted = @{
+            "bosphorus-core"   = "${{ inputs.core_version }}"
+            "bosphorus-divert" = "${{ inputs.divert_version }}"
+            "bosphorus-cli"    = "${{ inputs.cli_version }}"
+          }
+          foreach ($crate in $wanted.Keys) {
+            $v = $wanted[$crate].Trim()
+            if (-not $v) { Write-Host "$crate : unchanged"; continue }
+            if ($v -notmatch $semver) {
+              Write-Error "$crate : '$v' is not a version (expected e.g. 1.2.3 or 1.2.3-rc1)"
+              exit 1
+            }
+            cargo set-version --package $crate $v
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      # Cargo.lock must agree with the manifests or `--locked` below fails.
+      - name: Sync Cargo.lock
+        run: cargo update --workspace
+
+      - name: Resolved versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versions = @{}
+          foreach ($crate in "bosphorus-core", "bosphorus-divert", "bosphorus-cli") {
+            $v = (Select-String -Path "crates/$crate/Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+            $versions[$crate] = $v
+            Write-Host "$crate $v"
+          }
+          # Handed to the later steps so the tag and the artifact name agree
+          # with what was actually built.
+          "cli_version=$($versions['bosphorus-cli'])" >> $env:GITHUB_ENV
+          "core_version=$($versions['bosphorus-core'])" >> $env:GITHUB_ENV
+
+      # Stop a release before it builds if its tag is already taken, rather
+      # than after, when the bumps have been pushed.
+      - name: Check the release tag is free
+        if: inputs.mode == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --tags --quiet
+          if (git tag --list "v$env:cli_version") {
+            Write-Error "tag v$env:cli_version already exists — give bosphorus-cli a new version"
+            exit 1
+          }
+          Write-Host "OK: v$env:cli_version is free"
+
+      - name: Fetch WinDivert ${{ env.WINDIVERT_VERSION }} runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/basil00/WinDivert/releases/download/v$env:WINDIVERT_VERSION/$env:WINDIVERT_ASSET"
+          Invoke-WebRequest -Uri $url -OutFile windivert.zip
+          Expand-Archive -Path windivert.zip -DestinationPath assets -Force
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Build (release-dist)
+        run: cargo build --workspace --profile release-dist --locked
+
+      - name: Smoke test the built binary
+        run: |
+          ./target/release-dist/bosphorus.exe --version
+          ./target/release-dist/bosphorus.exe --check-filters
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release-dist/bosphorus.exe dist/
+          Copy-Item "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64/WinDivert.dll" dist/
+          Copy-Item "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64/WinDivert64.sys" dist/
+
+      # The name carries the versions and the commit, so a test build sitting
+      # in the Artifacts list is never mistaken for a released one.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bosphorus-${{ inputs.mode }}-v${{ env.cli_version }}-core${{ env.core_version }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      # --- release only, and only once everything above passed --------------
+
+      - name: Commit the version bumps
+        if: inputs.mode == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock crates/*/Cargo.toml
+          # Releasing without a version change is allowed; there is simply
+          # nothing to commit in that case.
+          if (git diff --cached --quiet) {
+            Write-Host "no version change to commit"
+          } else {
+            git commit -m "Release bosphorus-cli v$env:cli_version (core $env:core_version)"
+            git push origin HEAD:${{ github.ref_name }}
+          }
+
+      - name: Tag the release
+        if: inputs.mode == 'release'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git tag "v$env:cli_version"
+          git push origin "v$env:cli_version"
+
+      - name: Zip release asset
+        if: inputs.mode == 'release'
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "bosphorus-v$env:cli_version-windows-x64.zip"
+
+      - name: Publish GitHub Release
+        if: inputs.mode == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.cli_version }}
+          name: bosphorus v${{ env.cli_version }}
+          body: |
+            `bosphorus.exe` ${{ env.cli_version }}, engine (bosphorus-core) ${{ env.core_version }}.
+
+            Unzip and run `bosphorus.exe`. Keep `WinDivert.dll` and
+            `WinDivert64.sys` next to it — moving the executable away from them
+            breaks the driver.
+          files: bosphorus-*-windows-x64.zip
+          generate_release_notes: true

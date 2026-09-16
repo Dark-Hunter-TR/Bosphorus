@@ -3,12 +3,14 @@ name: build
 # Laptop-less CI: every push to main, every PR, and any manual run produces a
 # downloadable Windows binary under the workflow's "Artifacts" section — no
 # local Windows machine or Rust toolchain needed to get a fresh bosphorus.exe.
-# Pushing a `v*` tag additionally publishes a GitHub Release (see release.yml).
+#
+# This workflow never releases. Versions and Releases belong to
+# `manual-build.yml`, which is the one place that decides what number each
+# crate carries — so a tag pushed by hand does nothing on its own.
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -76,43 +78,3 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Push a `v*` tag (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to get a
-  # permanent, linkable download instead of a 90-day workflow artifact.
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      # Catch a tag that doesn't match [workspace.package].version in
-      # Cargo.toml before a Release goes out under the wrong name — bump
-      # Cargo.toml (or the tag) and re-push if this fails.
-      - name: Verify tag matches Cargo.toml version
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
-          if ($cargoVersion -ne $tagVersion) {
-            Write-Error "tag v$tagVersion != [workspace.package] version $cargoVersion in Cargo.toml"
-            exit 1
-          }
-          Write-Host "OK: tag matches Cargo.toml version $cargoVersion"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: bosphorus-windows-x64
-          path: dist
-
-      - name: Zip release asset
-        shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath "bosphorus-${{ github.ref_name }}-windows-x64.zip"
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: bosphorus-*-windows-x64.zip
-          generate_release_notes: true
