@@ -1,9 +1,10 @@
 [package]
 name = "bosphorus-core"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "DPI evasion + discovery core; platform-agnostic (no WinDivert dependency)"
 publish = false
 

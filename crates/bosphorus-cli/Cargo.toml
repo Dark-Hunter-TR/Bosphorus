@@ -1,9 +1,11 @@
 [package]
 name = "bosphorus-cli"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "The bosphorus.exe binary: WinDivert backend, Windows Service host, CLI"
 publish = false
 
 [[bin]]

@@ -6,12 +6,15 @@ members = [
     "crates/bosphorus-cli",
 ]
 
+# Deliberately no shared `version` here: each crate carries its own, so a core
+# change can ship without dragging the CLI's number along. The path deps
+# between them declare no version requirement, so a bump never forces an edit
+# in a dependent. `.github/workflows/manual-build.yml` is what writes them.
 [workspace.package]
-version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-repository = "local"
+repository = "https://github.com/Dark-Hunter-TR/Bosphorus"
 
 [workspace.dependencies]
 windows = { version = "0.48", features = [

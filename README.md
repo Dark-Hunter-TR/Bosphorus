@@ -32,6 +32,7 @@ trick in, and remembers it per network — with zero manual tuning.
 - [Project layout](#project-layout)
 - [Requirements](#requirements)
 - [Building from source](#building-from-source)
+- [Cutting a build](#cutting-a-build)
 - [Command-line usage](#command-line-usage)
 - [Running as a Windows Service](#running-as-a-windows-service)
 - [Files, folders & logs](#files-folders--logs)
@@ -347,9 +348,9 @@ A Cargo workspace of three crates:
 > workflow compiles `bosphorus.exe` on a GitHub-hosted Windows runner and
 > uploads it — with `WinDivert.dll` and `WinDivert64.sys` alongside it — as a
 > downloadable workflow artifact. Open the latest green run's **Summary**
-> page and grab `bosphorus-windows-x64` under **Artifacts**. Pushing a `v*`
-> tag additionally publishes those files as a permanent GitHub Release. No
-> local Rust toolchain or WinDivert download required.
+> page and grab it under **Artifacts**. No local Rust toolchain or WinDivert
+> download required. To build a *specific version*, see
+> [cutting a build](#cutting-a-build).
 
 1. **Get the WinDivert 2.2.2 binaries.** Download the official
    `WinDivert-2.2.2-A.zip` from the `basil00/WinDivert` v2.2.2 release and
@@ -378,6 +379,35 @@ A Cargo workspace of three crates:
    ```powershell
    cargo test                            # unit + integration tests, no elevation needed
    ```
+
+## Cutting a build
+
+Versions are set by hand, one crate at a time, from the
+[`manual build`](../../actions/workflows/manual-build.yml) workflow — **Run
+workflow**, fill in only the crates that changed, and leave the rest blank.
+
+| Crate | What it is | Bump it when |
+|---|---|---|
+| `bosphorus-core` | The engine: conntrack, discovery, strategies, persistence. | Detection or evasion behaviour changed. |
+| `bosphorus-divert` | The WinDivert wrapper. | The capture/injection layer changed. |
+| `bosphorus-cli` | `bosphorus.exe` itself. **Names the release.** | Anything a user of the binary would notice. |
+
+A blank box means that crate keeps the number it already has, so a fix confined
+to the engine can go out as core `0.2.0` while the binary stays `0.1.0`.
+`bosphorus.exe --version` prints both, so a bug report says which engine is
+inside which build.
+
+**Mode** decides what the run is worth:
+
+- **`test`** — builds, runs the tests, and leaves a downloadable artifact
+  named after the versions and the commit. Nothing is committed, tagged or
+  published, so a version can be tried out without being spent.
+- **`release`** — does all of that, then commits the bumps, tags
+  `v<bosphorus-cli version>`, and publishes a GitHub Release. It refuses to
+  start if that tag already exists, so a release always gets a fresh number.
+
+Versions only ever move forwards; the workflow rejects a number lower than the
+one a crate already carries.
 
 ## Command-line usage
 

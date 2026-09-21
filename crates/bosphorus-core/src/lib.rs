@@ -36,3 +36,7 @@ pub use strategy::{DefaultGenerator, OverlapFill, Strategy};
 
 /// Recv buffer size for the capture loop (offload/coalesced segments fit).
 pub const MAX_CAPTURE: usize = 65_535;
+
+/// This crate's version, which moves independently of the CLI's — the binary
+/// reports both so a bug report says which engine is inside it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

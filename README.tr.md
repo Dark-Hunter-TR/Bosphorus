@@ -32,6 +32,7 @@ bazında hatırlar — elle hiçbir ayar yapmadan.
 - [Proje yapısı](#proje-yapısı)
 - [Gereksinimler](#gereksinimler)
 - [Kaynaktan derleme](#kaynaktan-derleme)
+- [Build almak](#build-almak)
 - [Komut satırı kullanımı](#komut-satırı-kullanımı)
 - [Windows Hizmeti olarak çalıştırma](#windows-hizmeti-olarak-çalıştırma)
 - [Dosyalar, klasörler ve günlükler](#dosyalar-klasörler-ve-günlükler)
@@ -353,9 +354,9 @@ Derlemenizin gönderdiği tam gridi yazdırmak için
 > runner'da derler ve (`WinDivert.dll` / `WinDivert64.sys` ile birlikte)
 > indirilebilir bir iş akışı çıktısı olarak yükler. En son yeşil çalışmanın
 > **Summary** sayfasından **Artifacts** altındaki `bosphorus-windows-x64`'ü
-> indirin. Bir `v*` etiketi push etmek bu dosyaları kalıcı bir GitHub
-> Release olarak da yayınlar. Yerel bir Rust kurulumu ya da WinDivert
-> indirmesi gerekmez.
+> indirin. Yerel bir Rust kurulumu ya da WinDivert indirmesi gerekmez.
+> *Belirli bir sürümü* derlemek için [build almak](#build-almak) bölümüne
+> bakın.
 
 1. **WinDivert 2.2.2 ikili dosyalarını edinin.** `basil00/WinDivert` v2.2.2
    sürümünden resmi `WinDivert-2.2.2-A.zip` dosyasını indirin ve şu yol
@@ -383,6 +384,37 @@ Derlemenizin gönderdiği tam gridi yazdırmak için
    ```powershell
    cargo test                            # birim + entegrasyon testleri, yükseltme gerekmez
    ```
+
+## Build almak
+
+Sürümler elle, crate başına,
+[`manual build`](../../actions/workflows/manual-build.yml) iş akışından
+belirlenir — **Run workflow**'a basın, yalnızca değiştirdiğiniz crate'leri
+doldurun, gerisini boş bırakın.
+
+| Crate | Nedir | Ne zaman artırılır |
+|---|---|---|
+| `bosphorus-core` | Motor: bağlantı takibi, keşif, stratejiler, kalıcılık. | Tespit ya da atlatma davranışı değiştiyse. |
+| `bosphorus-divert` | WinDivert sarmalayıcısı. | Yakalama/enjeksiyon katmanı değiştiyse. |
+| `bosphorus-cli` | `bosphorus.exe`'nin kendisi. **Release'e adını verir.** | Binary'yi kullanan birinin fark edeceği her şey. |
+
+Boş bırakılan kutu, o crate'in mevcut numarasını koruması demektir; yani
+yalnızca motoru ilgilendiren bir düzeltme core `0.2.0` olarak çıkarken binary
+`0.1.0` kalabilir. `bosphorus.exe --version` ikisini birden yazar, böylece bir
+hata bildirimi hangi motorun hangi build'in içinde olduğunu da söyler.
+
+**Mode**, çalışmanın ne anlama geldiğini belirler:
+
+- **`test`** — derler, testleri çalıştırır ve sürümlerle commit'e göre
+  adlandırılmış indirilebilir bir çıktı bırakır. Hiçbir şey commit'lenmez,
+  etiketlenmez, yayınlanmaz; yani bir sürüm harcanmadan denenebilir.
+- **`release`** — bunların hepsini yapar, ardından sürüm değişikliklerini
+  commit'ler, `v<bosphorus-cli sürümü>` etiketini atar ve bir GitHub Release
+  yayınlar. O etiket zaten varsa hiç başlamaz, böylece her release taze bir
+  numara alır.
+
+Sürümler yalnızca ileri gider; iş akışı bir crate'in mevcut numarasından
+düşük bir değeri reddeder.
 
 ## Komut satırı kullanımı
 
