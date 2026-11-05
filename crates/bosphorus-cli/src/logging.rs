@@ -2,6 +2,12 @@
 //! the service logs to a rolling daily file under `%ProgramData%\Bosphorus\logs`
 //! and mirrors ERROR / `bosphorus::net` / grid-EXHAUSTED events to the Windows
 //! Event Log.
+//!
+//! Console output is always plain text. `tracing-subscriber` writes ANSI colour
+//! escapes whenever the `ansi` feature is compiled in, and a Windows console --
+//! or any redirected output -- prints them literally (`[0m`, `[32m`, ...). Every
+//! console sink therefore goes through [`console_layer`], which disables them.
+//! The service's file layer already did.
 
 use std::path::{Path, PathBuf};
 
@@ -19,13 +25,38 @@ pub enum LogSink {
     ServiceFile { dir: PathBuf },
 }
 
+/// The console formatter: target-tagged, and **never** ANSI.
+///
+/// A function rather than a builder expression repeated at each call site, so the
+/// ANSI policy is decided once and a test can render events through exactly the
+/// configuration production uses.
+pub fn console_layer<S, W>(writer: W) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + 'static,
+{
+    tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_target(true)
+        .with_writer(writer)
+}
+
+/// Install the interactive console subscriber: `RUST_LOG` if set, else
+/// `default_filter`, with ANSI escapes disabled.
+pub fn init_console(default_filter: &str) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer(std::io::stdout))
+        .try_init();
+}
+
 /// Install the global subscriber. For the service, returns a guard that must be
 /// held for the lifetime of the process (flushes the non-blocking file writer).
 pub fn init(sink: LogSink) -> Option<WorkerGuard> {
     match sink {
         LogSink::Console => {
-            let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-            let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
+            init_console("info");
             None
         }
         LogSink::ServiceFile { dir } => {
@@ -109,5 +140,90 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
             Level::WARN => crate::eventlog::warn(id, &msg),
             _ => crate::eventlog::info(id, &msg),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// A `MakeWriter` that keeps everything the subscriber emits.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).expect("utf-8 log output")
+        }
+    }
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Regression: console logs used `tracing_subscriber::fmt()` with the default
+    /// (ANSI-enabled) formatter, so a Windows console — or any redirected output —
+    /// showed the escapes literally instead of ignoring them.
+    #[test]
+    fn console_output_contains_no_ansi_escapes() {
+        let sink = Captured::default();
+        let subscriber = tracing_subscriber::registry().with(console_layer(sink.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "bosphorus::discovery", key = "example.com", tried = 3, "info");
+            tracing::warn!(target: "bosphorus::net", "warn");
+            tracing::error!(target: "bosphorus::engine", "error");
+        });
+
+        let text = sink.text();
+        // The messages still reach the console...
+        for expected in ["info", "warn", "error", "example.com"] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+        // ...without any escape sequence.
+        assert!(
+            !text.contains('\u{1b}'),
+            "ANSI escape emitted to the console: {text:?}"
+        );
+        for code in ["[0m", "[32m", "[31m", "[1m"] {
+            assert!(
+                !text.contains(code),
+                "literal ANSI code {code:?} in console output: {text:?}"
+            );
+        }
+    }
+
+    /// The target tag is part of the console format and must survive with ANSI
+    /// off: it is what distinguishes `bosphorus::discovery` from `bosphorus::net`.
+    #[test]
+    fn console_output_keeps_the_target_tag() {
+        let sink = Captured::default();
+        let subscriber = tracing_subscriber::registry().with(console_layer(sink.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "bosphorus::discovery", "tagged");
+        });
+        assert!(
+            sink.text().contains("bosphorus::discovery"),
+            "{}",
+            sink.text()
+        );
     }
 }

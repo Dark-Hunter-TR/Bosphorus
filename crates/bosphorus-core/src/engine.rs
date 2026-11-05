@@ -57,7 +57,7 @@ impl Default for StopFlag {
     }
 }
 
-/// How often `tick` emits the per-target discovery progress digest.
+/// How often `tick` emits the one-line discovery progress summary.
 const DIGEST_EVERY: Duration = Duration::from_secs(10);
 /// How often `tick` writes the discovery profile to disk.
 const PERSIST_EVERY: Duration = Duration::from_secs(30);
@@ -771,8 +771,24 @@ impl Engine {
             }
             *last = now;
         }
+
+        // One line per interval. A line per target per 10 s buried everything else
+        // on a real sweep, so the summary is what INFO carries and the per-target
+        // rows moved to DEBUG:  RUST_LOG=bosphorus::discovery=debug
+        let summary = digest_summary(&working);
+        tracing::info!(
+            target: "bosphorus::discovery",
+            targets = summary.targets,
+            probing = summary.probing,
+            trying = summary.trying,
+            tried = summary.tried,
+            in_flight = summary.in_flight,
+            latest = %summary.latest.as_deref().unwrap_or("-"),
+            "discovery progress"
+        );
+
         for t in &working {
-            tracing::info!(
+            tracing::debug!(
                 target: "bosphorus::discovery",
                 key = %t.key,
                 phase = ?t.phase,
@@ -780,10 +796,55 @@ impl Engine {
                 total = t.total,
                 in_flight = t.in_flight,
                 last_trial_s = t.last_trial_age.map(|d| d.as_secs()).unwrap_or(0),
-                "discovery progress"
+                "discovery target"
             );
         }
     }
+}
+
+/// The numbers behind the one-line discovery digest.
+///
+/// Kept separate from the logging call so the readability logic can be tested
+/// without installing a subscriber.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DigestSummary {
+    /// Targets currently being worked (`Probe` or `Discover`).
+    targets: usize,
+    /// Of those, how many are still in the `Probe` (control) phase.
+    probing: usize,
+    /// How many are exploring candidates, i.e. `Discover`.
+    trying: usize,
+    /// Strategies tried across all of them, summed.
+    tried: usize,
+    /// Trials handed out and not yet resolved, summed.
+    in_flight: usize,
+    /// Host with the most recent trial — the one a reader is most likely to be
+    /// waiting on. `None` when nothing has been assigned yet.
+    latest: Option<String>,
+}
+
+/// Fold the working targets into the digest the summary line logs.
+fn digest_summary(working: &[TargetSummary]) -> DigestSummary {
+    let mut out = DigestSummary {
+        targets: working.len(),
+        // `Duration::MAX` sorts "never assigned" last, so the most recently
+        // active host wins however long the process has been running.
+        latest: working
+            .iter()
+            .min_by_key(|t| t.last_trial_age.unwrap_or(Duration::MAX))
+            .map(|t| t.key.clone()),
+        ..Default::default()
+    };
+    for t in working {
+        match t.phase {
+            NetPhase::Probe => out.probing += 1,
+            NetPhase::Discover => out.trying += 1,
+            _ => {}
+        }
+        out.tried += t.tried;
+        out.in_flight += t.in_flight;
+    }
+    out
 }
 
 /// Lowercased SNI host from a ClientHello, if one can be read (including from a
@@ -880,6 +941,65 @@ mod tests {
     use super::*;
     use crate::source_sink::{Captured, RawAddr};
     use crate::strategy::FAKE_HTTPS_REQUEST;
+
+    /// Minimal subscriber for asserting on what the digest logs. `tracing-core`
+    /// is already a dependency; no test-only crate is pulled in.
+    mod test_log {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event as TracingEvent, Metadata, Subscriber};
+
+        #[derive(Debug, Clone)]
+        pub struct Event {
+            pub level: tracing::Level,
+            pub target: String,
+            pub message: String,
+        }
+
+        #[derive(Default)]
+        pub struct Collector(Mutex<Vec<Event>>);
+
+        impl Collector {
+            pub fn events(&self) -> Vec<Event> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        struct Msg(String);
+        impl Visit for Msg {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        pub struct Capture(pub Arc<Collector>);
+
+        impl Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &TracingEvent<'_>) {
+                let mut msg = Msg(String::new());
+                event.record(&mut msg);
+                self.0 .0.lock().unwrap().push(Event {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    message: msg.0,
+                });
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+    }
 
     struct VecSource {
         packets: Vec<(Vec<u8>, bool)>, // (bytes, outbound)
@@ -1813,5 +1933,115 @@ mod tests {
             "interference is a property of the network that was left behind"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    // --- discovery digest --------------------------------------------------
+
+    fn summary_of(
+        key: &str,
+        phase: NetPhase,
+        tried: usize,
+        in_flight: usize,
+        age: Option<u64>,
+    ) -> TargetSummary {
+        TargetSummary {
+            key: key.to_string(),
+            phase,
+            tried,
+            total: 10,
+            in_flight,
+            last_trial_age: age.map(Duration::from_secs),
+            from_disk: false,
+            active: None,
+            active_is_passthrough: false,
+            best: None,
+        }
+    }
+
+    #[test]
+    fn the_digest_summary_folds_every_working_target_into_one_line() {
+        let working = vec![
+            summary_of("a.example", NetPhase::Probe, 1, 1, Some(30)),
+            summary_of("b.example", NetPhase::Discover, 4, 2, Some(2)),
+            summary_of("c.example", NetPhase::Discover, 3, 0, None),
+        ];
+        let d = digest_summary(&working);
+        assert_eq!(d.targets, 3);
+        assert_eq!(d.probing, 1);
+        assert_eq!(d.trying, 2);
+        assert_eq!(d.tried, 8);
+        assert_eq!(d.in_flight, 3);
+        assert_eq!(
+            d.latest.as_deref(),
+            Some("b.example"),
+            "the most recently trialled host is the useful one to name"
+        );
+    }
+
+    #[test]
+    fn the_digest_summary_of_nothing_is_empty() {
+        assert_eq!(digest_summary(&[]), DigestSummary::default());
+    }
+
+    /// Regression: the digest used to log one INFO line per working target every
+    /// 10 s. It must now be a single INFO line, with the per-target rows only at
+    /// DEBUG so `RUST_LOG=bosphorus::discovery=debug` still has them.
+    #[test]
+    fn one_info_summary_per_digest_and_per_target_detail_only_at_debug() {
+        let captured = Arc::new(test_log::Collector::default());
+        let subscriber = test_log::Capture(captured.clone());
+
+        let engine = Engine::new(EvasionConfig::default());
+        // Two targets in flow state, so the digest has something to summarise.
+        for (host, port) in [
+            ("digest-a.example", 42_001u16),
+            ("digest-b.example", 42_002),
+        ] {
+            let mut ch = ch_with_sni(host, port);
+            let mut meta = out_meta();
+            engine.process(&mut ch, &mut meta, &mut SendBatch::new());
+            let mut rst = inbound_rst(port);
+            let mut meta = in_meta();
+            engine.process(&mut rst, &mut meta, &mut SendBatch::new());
+        }
+
+        let now = Instant::now();
+        tracing::subscriber::with_default(subscriber, || {
+            engine.tick(now + Duration::from_secs(30));
+        });
+
+        let events = captured.events();
+        let info: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::INFO && e.target == "bosphorus::discovery")
+            .collect();
+        assert_eq!(
+            info.len(),
+            1,
+            "expected exactly one INFO digest line, got {:?}",
+            info.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            info[0].message.contains("discovery progress"),
+            "{}",
+            info[0].message
+        );
+
+        let per_target: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::DEBUG && e.target == "bosphorus::discovery")
+            .filter(|e| e.message.contains("discovery target"))
+            .collect();
+        assert_eq!(
+            per_target.len(),
+            2,
+            "one DEBUG row per working target, got {}",
+            per_target.len()
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.level == tracing::Level::INFO && e.message.contains("discovery target")),
+            "per-target rows must not be logged at INFO"
+        );
     }
 }

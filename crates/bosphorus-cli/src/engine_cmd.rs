@@ -245,7 +245,9 @@ pub fn list_grid(enable_overlap: bool) {
 /// sweep by one, so `tried` accumulates across invocations. `--fresh` deletes
 /// the demo profile first.
 pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
-    init_tracing_with_default("bosphorus::discovery=info,bosphorus::strategy=info,bosphorus::conntrack=info");
+    crate::logging::init_console(
+        "bosphorus::discovery=info,bosphorus::strategy=info,bosphorus::conntrack=info",
+    );
 
     let dir = std::env::temp_dir().join("bosphorus-discovery-demo");
     let path = bosphorus_core::profile::persist::profile_path(&dir, "demo");
@@ -351,12 +353,6 @@ fn in_meta() -> bosphorus_core::CaptureMeta {
     bosphorus_core::CaptureMeta { outbound: false, ..Default::default() }
 }
 
-fn init_tracing_with_default(default: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
-}
-
 /// Minimal IPv4/TCP ClientHello 10.0.0.9:<sport> -> 93.184.216.34:443 with SNI.
 fn demo_client_hello(host: &str, sport: u16) -> Vec<u8> {
     let h = host.as_bytes();
@@ -453,15 +449,6 @@ pub fn check_filters() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .try_init();
-}
-
 /// Open the blanket QUIC-block handle, if this run's policy asked for one.
 ///
 /// `WINDIVERT_FLAG_DROP` means the driver discards every match without queueing
@@ -507,7 +494,8 @@ pub struct EngineOpts {
 pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
     let EngineOpts { secs, strategy, enable_overlap, profile_dir: profile_dir_override, isp, quic } =
         opts;
-    init_tracing();
+    // Console logs are plain text (no ANSI escapes); see `logging::console_layer`.
+    crate::logging::init_console("info");
     let mut cfg = cfg_for(enable_overlap);
     cfg.quic = quic;
 
