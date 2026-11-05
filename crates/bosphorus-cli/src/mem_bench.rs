@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use bosphorus_core::{CaptureMeta, Decision, Engine, EvasionConfig, NetPhase, ProfilePaths, SendBatch};
 
 pub fn run(n: usize) -> anyhow::Result<()> {
-    init_tracing();
+    // Console logs are plain text (no ANSI escapes); see `logging::console_layer`.
+    crate::logging::init_console("bosphorus::mem=debug");
 
     let dir = std::env::temp_dir().join("bosphorus-mem-bench");
     let _ = std::fs::remove_dir_all(&dir);
@@ -135,12 +136,6 @@ fn working_set_kib() -> (u64, u64) {
     } else {
         (0, 0)
     }
-}
-
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("bosphorus::mem=debug"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
 }
 
 // --- synthetic packets (IPv4/TCP, 10.0.0.9 <-> 93.184.216.34:443) ---------
