@@ -174,15 +174,22 @@ fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 /// location. When no install dir is given, the current exe must already reside
 /// in a trusted install location; when an install dir is given, that destination
 /// must be a trusted install location (never a transient/user-profile/temp path).
+/// G2: the relevant install/service-binary directory must be owned by a trusted
+/// privileged principal (verified on Windows before copy/register).
 fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe()?;
     let Some(dst_dir) = &opts.install_dir else {
         validate_service_install_target(&current, false)?;
+        let install_dir = current
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        validate_service_install_directory_owner(install_dir, false)?;
         return Ok(current);
     };
 
     validate_service_install_target(dst_dir, true)?;
     std::fs::create_dir_all(dst_dir)?;
+    validate_service_install_directory_owner(dst_dir, true)?;
     let src_dir = current
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -205,12 +212,10 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
 
 /// Validate that `path` is an acceptable LocalSystem service binary/install target (G1).
 ///
-/// Policy (lexical, intentionally conservative without ACL/owner checks — those are G2/G3):
-/// - reject obviously transient or user-writable locations (Temp/Downloads/Desktop/AppData,
-///   user profile directories, build output/target dirs), and
-/// - require the path to reside under a trusted system program location
-///   (`Program Files` / `Program Files (x86)`), which is the standard protected location
-///   for service binaries.
+/// Policy (lexical): reject obviously transient or user-writable locations and require
+/// the path to reside under a trusted system program location (`Program Files` /
+/// `Program Files (x86)`). G2 adds owner verification of the relevant install
+/// directory; G3 will cover ancestor-chain trust (not handled here).
 ///
 /// `explicit_install_dir` controls the actionable error guidance.
 fn validate_service_install_target(
@@ -245,7 +250,7 @@ fn validate_service_install_target(
             anyhow::bail!(
                 "refusing to install the LocalSystem service into a non-trusted location: {}\n\
                  --install-dir must point to a protected program location such as \
-                 C:\\Program Files\\Bosphorus (G1 does not verify directory ACLs/ownership)",
+                 C:\\Program Files\\Bosphorus (G2 verifies directory owner on Windows; G3 will verify ancestor trust)",
                 path.display()
             );
         }
@@ -258,6 +263,188 @@ fn validate_service_install_target(
     }
 
     Ok(())
+}
+
+/// Well-known SIDs accepted as trusted owners for a LocalSystem service install directory (G2).
+///
+/// Policy rationale (MS Learn / Windows security model):
+/// - `S-1-5-18` (NT AUTHORITY\SYSTEM / LocalSystem): built-in OS account.
+/// - `S-1-5-32-544` (BUILTIN\Administrators): local administrators alias.
+/// - `S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464`
+///   (NT SERVICE\TrustedInstaller): Windows Modules Installer / TrustedInstaller service SID,
+///   common owner of protected program locations.
+/// Any other owner is treated as untrusted for a LocalSystem service binary directory.
+fn is_trusted_install_owner_sid(owner_sid: &str) -> bool {
+    owner_sid.eq_ignore_ascii_case("S-1-5-18")
+        || owner_sid.eq_ignore_ascii_case("S-1-5-32-544")
+        || owner_sid
+            .eq_ignore_ascii_case("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+}
+
+/// Verify the relevant install/service-binary directory is owned by a trusted privileged
+/// principal (G2). Fails closed with actionable errors if the owner is untrusted or cannot
+/// be determined.
+///
+/// On Windows this queries the directory owner via `GetNamedSecurityInfoW`
+/// (`OWNER_SECURITY_INFORMATION`, `SE_FILE_OBJECT`) and compares the owner SID against the
+/// trusted set above. On non-Windows platforms the owner cannot be verified, so this
+/// returns an explicit error (Windows runtime behavior is SUSPECTED/unverified here).
+fn validate_service_install_directory_owner(
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        let owner_sid = query_directory_owner_sid(install_dir).map_err(|e| {
+            owner_verification_error(install_dir, explicit_install_dir, &format!("{e}"))
+        })?;
+        if !is_trusted_install_owner_sid(&owner_sid) {
+            anyhow::bail!(untrusted_owner_message(
+                install_dir,
+                explicit_install_dir,
+                &owner_sid
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = install_dir;
+        let _ = explicit_install_dir;
+        anyhow::bail!(
+            "cannot verify install directory owner on this platform (G2 requires Windows security APIs); \
+             refusing to install a LocalSystem service without owner verification"
+        )
+    }
+}
+
+#[cfg(windows)]
+fn owner_verification_error(
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+    detail: &str,
+) -> anyhow::Error {
+    if explicit_install_dir {
+        anyhow::anyhow!(
+            "cannot verify install directory owner for {}: {}\n\
+             refusing to install the LocalSystem service into --install-dir without owner verification (G2). \
+             Ensure the directory exists under a protected program location (e.g. C:\\Program Files\\Bosphorus) \
+             and is owned by SYSTEM, Administrators, or TrustedInstaller",
+            install_dir.display(),
+            detail
+        )
+    } else {
+        anyhow::anyhow!(
+            "cannot verify install directory owner for {}: {}\n\
+             refusing to install the LocalSystem service from this location without owner verification (G2). \
+             Move the executable under C:\\Program Files\\Bosphorus or use --install-dir",
+            install_dir.display(),
+            detail
+        )
+    }
+}
+
+#[cfg(windows)]
+fn untrusted_owner_message(
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+    owner_sid: &str,
+) -> String {
+    if explicit_install_dir {
+        format!(
+            "refusing to install the LocalSystem service into an untrusted install directory: {}\n\
+             directory owner SID {owner_sid} is not trusted for a LocalSystem service binary (G2). \
+             Trusted owners: NT AUTHORITY\\SYSTEM (S-1-5-18), BUILTIN\\Administrators (S-1-5-32-544), \
+             NT SERVICE\\TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464). \
+             Choose a protected --install-dir such as C:\\Program Files\\Bosphorus with a trusted owner",
+            install_dir.display()
+        )
+    } else {
+        format!(
+            "refusing to install the LocalSystem service from an untrusted install directory: {}\n\
+             directory owner SID {owner_sid} is not trusted for a LocalSystem service binary (G2). \
+             Trusted owners: NT AUTHORITY\\SYSTEM (S-1-5-18), BUILTIN\\Administrators (S-1-5-32-544), \
+             NT SERVICE\\TrustedInstaller (S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464). \
+             Move the executable under C:\\Program Files\\Bosphorus or use --install-dir",
+            install_dir.display()
+        )
+    }
+}
+
+#[cfg(windows)]
+fn query_directory_owner_sid(path: &std::path::Path) -> anyhow::Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL, WIN32_ERROR};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut owner_sid = PSID::default();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path; output pointers receive
+    // views into or ownership of `sd` as documented by GetNamedSecurityInfoW.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner_sid),
+            None,
+            None,
+            None,
+            Some(&mut sd),
+        )
+    };
+    if status != WIN32_ERROR(0) {
+        anyhow::bail!(
+            "GetNamedSecurityInfoW failed with WIN32_ERROR({})",
+            status.0
+        );
+    }
+    if sd.is_invalid() {
+        anyhow::bail!("GetNamedSecurityInfoW returned no security descriptor");
+    }
+
+    struct LocalAllocGuard(HLOCAL);
+    impl Drop for LocalAllocGuard {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                // SAFETY: handle was allocated by a Windows security API and is
+                // freed exactly once here; contained pointers become invalid.
+                unsafe {
+                    let _ = LocalFree(self.0);
+                }
+            }
+        }
+    }
+    let _sd_guard = LocalAllocGuard(HLOCAL(sd.0));
+
+    if owner_sid.is_invalid() {
+        anyhow::bail!("security descriptor does not contain an owner SID");
+    }
+
+    let mut sid_str = PWSTR::null();
+    // SAFETY: `owner_sid` is valid while `_sd_guard` is alive; `sid_str`
+    // receives a LocalAlloc-allocated string on success.
+    unsafe { ConvertSidToStringSidW(owner_sid, &mut sid_str) }
+        .ok()
+        .map_err(|e| anyhow::anyhow!("ConvertSidToStringSidW failed: {e}"))?;
+    let _sid_guard = LocalAllocGuard(HLOCAL(sid_str.as_ptr() as _));
+
+    // SAFETY: `sid_str` is a valid NUL-terminated UTF-16 string allocated by
+    // ConvertSidToStringSidW and guarded by `_sid_guard`.
+    let sid = unsafe { sid_str.to_string() }
+        .map_err(|e| anyhow::anyhow!("owner SID is not valid UTF-16: {e}"))?;
+    Ok(sid)
 }
 
 fn unsafe_install_target_reason(path: &std::path::Path) -> Option<&'static str> {
@@ -521,8 +708,9 @@ mod tests {
 
     #[test]
     fn rejects_non_trusted_locations_even_if_not_obviously_transient() {
-        // Without ACL/owner verification (G2/G3), arbitrary locations are not
-        // accepted as safe LocalSystem service binary targets.
+        // Without ancestor-chain trust verification (G3), arbitrary locations outside
+        // protected program locations are not accepted as safe LocalSystem service
+        // binary targets (G2 owner verification applies only to accepted/lexically-trusted dirs).
         for p in [
             r"C:\Tools\Bosphorus",
             r"D:\Bosphorus",
@@ -560,5 +748,52 @@ mod tests {
             msg.contains("unsafe location"),
             "missing reason context: {msg}"
         );
+    }
+
+    // --- G2: install directory owner trust -----------------------------------
+
+    #[test]
+    fn trusted_install_owner_sids_are_accepted_case_insensitively() {
+        for sid in [
+            "S-1-5-18",
+            "s-1-5-18",
+            "S-1-5-32-544",
+            "s-1-5-32-544",
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+            "s-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+        ] {
+            assert!(is_trusted_install_owner_sid(sid), "expected trusted: {sid}");
+        }
+    }
+
+    #[test]
+    fn untrusted_install_owner_sids_are_rejected() {
+        for sid in [
+            "S-1-5-21-1000-1000-1000-1001", // ordinary user
+            "S-1-5-32-545",                 // Users group (not a trusted owner principal)
+            "S-1-1-0",                      // Everyone
+            "",
+        ] {
+            assert!(
+                !is_trusted_install_owner_sid(sid),
+                "expected untrusted: {sid}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_owner_verification_fails_closed() {
+        let err = validate_service_install_directory_owner(
+            &PathBuf::from(r"C:\Program Files\Bosphorus"),
+            true,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot verify install directory owner"),
+            "missing fail-closed reason: {msg}"
+        );
+        assert!(msg.contains("G2"), "missing G2 context: {msg}");
     }
 }
