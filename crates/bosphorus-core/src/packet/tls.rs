@@ -111,7 +111,10 @@ pub fn find_sni(payload: &[u8]) -> Option<SniLocation> {
 /// refused rather than guessed at. Returns `None` on any parse failure or if
 /// growing a length field would overflow its 16-bit range.
 pub fn add_padding_extension(payload: &[u8], pad_len: u16) -> Option<Vec<u8>> {
-    if !looks_like_client_hello(payload) {
+    // A complete ClientHello record needs at least the 5-byte TLS record
+    // header plus the 4-byte handshake header before reading handshake/body
+    // fields. `looks_like_client_hello` only proves `len >= 6`.
+    if payload.len() < 9 || !looks_like_client_hello(payload) {
         return None;
     }
     let record_len = u16::from_be_bytes([payload[3], payload[4]]) as usize;
@@ -295,7 +298,10 @@ mod tests {
 
         let record_len_after = u16::from_be_bytes([padded[3], padded[4]]);
         let hs_len_after = u32::from_be_bytes([0, padded[6], padded[7], padded[8]]);
-        assert_eq!(record_len_after as usize, record_len_before as usize + 4 + 512);
+        assert_eq!(
+            record_len_after as usize,
+            record_len_before as usize + 4 + 512
+        );
         assert_eq!(hs_len_after, hs_len_before + 4 + 512);
 
         // The new extension: type 0x0015, length 512, then 512 zero bytes.
@@ -330,6 +336,19 @@ mod tests {
     fn padding_rejects_non_clienthello() {
         assert!(add_padding_extension(b"not tls at all", 512).is_none());
         assert!(add_padding_extension(&[0x16, 0x03, 0x03, 0x00, 0x02, 0x02, 0x00], 512).is_none());
+    }
+
+    #[test]
+    fn padding_rejects_too_short_record_without_panicking() {
+        // Regression for B1 (packet/tls.rs:add_padding_extension): a 6-byte
+        // payload can satisfy `looks_like_client_hello` and
+        // `record_len == payload.len() - 5` while omitting handshake-length
+        // bytes, so reading payload[6..9] would panic. Padding must refuse it.
+        assert!(add_padding_extension(&[0x16, 0x03, 0x03, 0x00, 0x01, 0x01], 512).is_none());
+        // 8 bytes: still short of the 9-byte minimum (record + handshake hdr).
+        assert!(
+            add_padding_extension(&[0x16, 0x03, 0x03, 0x00, 0x03, 0x01, 0x00, 0x00], 512).is_none()
+        );
     }
 
     #[test]
