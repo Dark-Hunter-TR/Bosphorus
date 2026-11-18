@@ -184,6 +184,9 @@ fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
 /// must be a trusted install location (never a transient/user-profile/temp path).
 /// G2: the relevant install/service-binary directory must be owned by a trusted
 /// privileged principal (verified on Windows before copy/register).
+/// G19: WinDivert collateral (`WinDivert.dll`, `WinDivert64.sys`) must pass
+/// provenance/integrity verification before being copied or used (preflight runs after
+/// resolution in the install flow). Missing/unverifiable/mismatching collateral fails closed.
 fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe()?;
     let Some(dst_dir) = &opts.install_dir else {
@@ -192,6 +195,11 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         validate_service_install_ancestor_trust_chain(install_dir, false)?;
+        // No copy: the service/preflight will use collateral colocated with the current exe.
+        verify_windivert_collateral_in_dir(
+            install_dir,
+            "service install/preflight from the current executable directory (no --install-dir)",
+        )?;
         return Ok(current);
     };
 
@@ -201,19 +209,24 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
     let src_dir = current
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
+    // Verify source collateral before copying to the trusted install destination and before
+    // preflight/use in this process (G19, fail closed; `--force` does not bypass integrity).
+    verify_windivert_collateral_in_dir(
+        src_dir,
+        "copying WinDivert collateral from the current executable directory to --install-dir",
+    )?;
     let exe_dst = dst_dir.join("bosphorus.exe");
     std::fs::copy(&current, &exe_dst)?;
-    for f in ["WinDivert.dll", "WinDivert64.sys"] {
-        let s = src_dir.join(f);
-        if s.exists() {
-            std::fs::copy(&s, dst_dir.join(f))?;
-        } else {
-            eprintln!(
-                "warning: {} not found next to the exe; copy it into {} manually",
-                f,
-                dst_dir.display()
-            );
-        }
+    for expected in WINDIVERT_COLLATERAL_FILES {
+        let src = src_dir.join(expected.file_name);
+        let dst = dst_dir.join(expected.file_name);
+        std::fs::copy(&src, &dst).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to copy verified WinDivert collateral {} to {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        })?;
     }
     Ok(exe_dst)
 }
@@ -777,6 +790,217 @@ fn contains_policy_segment(norm_with_trailing_sep: &str, needle: &str) -> bool {
     norm_with_trailing_sep.contains(needle)
 }
 
+/// Expected WinDivert collateral shipped with this release (WinDivert 2.2.2-A, x64).
+///
+/// G19: installation must only copy/use collateral whose provenance and integrity are
+/// verified. Policy is fail-closed: missing, unreadable, unverifiable, or mismatching
+/// collateral is rejected with an actionable error (never silently accepted).
+///
+/// Provenance/integrity mechanism (defensible, Linux-testable): pinned SHA-256 hashes and
+/// exact file sizes for the exact x64 files this installer copies/uses
+/// (`WinDivert.dll`, `WinDivert64.sys`). These match the bundled
+/// `assets/WinDivert-2.2.2-A/x64/` artifacts in this repository (verified locally) and are
+/// corroborated by public provenance references for WinDivert 2.2.2 x64 collateral (e.g.
+/// SagerNet/sing-box pins `WinDivert64.sys` SHA-256 8da085... for 2.2.2; Manalyzer reports the
+/// same driver hash for the 2.2.2 x64 driver). This provides explicit integrity verification
+/// against a known-good release artifact set.
+///
+/// Windows Authenticode/signature verification (WinVerifyTrust / WINTRUST_FILE_INFO or catalog
+/// verification for `.sys`) is recommended by Windows guidance, but WinTrust APIs are
+/// Windows-runtime only and cannot be executed/validated on this Linux dev machine; any such
+/// runtime signature check is therefore SUSPECTED/unverified here. The pinned-hash gate is the
+/// enforced, cross-platform-verifiable control for this change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExpectedCollateral {
+    file_name: &'static str,
+    sha256_hex: &'static str,
+    size_bytes: u64,
+}
+
+const WINDIVERT_COLLATERAL_FILES: &[ExpectedCollateral] = &[
+    ExpectedCollateral {
+        file_name: "WinDivert.dll",
+        sha256_hex: "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2",
+        size_bytes: 47616,
+    },
+    ExpectedCollateral {
+        file_name: "WinDivert64.sys",
+        sha256_hex: "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2",
+        size_bytes: 94144,
+    },
+];
+
+/// Compute SHA-256 digest of `data` and return it as a lowercase hex string.
+///
+/// Small, self-contained implementation (FIPS 180-4) used so provenance verification does not
+/// depend on external hashing crates and remains testable on Linux.
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = sha256_digest(data);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+fn sha256_digest(data: &[u8]) -> [u8; 32] {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let mut msg = data.to_vec();
+    let bit_len = (data.len() as u64) * 8;
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for (i, c) in chunk.chunks(4).enumerate().take(16) {
+            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = [0u8; 32];
+    for (i, v) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    out
+}
+
+/// Verify WinDivert collateral files in `dir` against pinned provenance/integrity expectations (G19).
+///
+/// `purpose` is included in errors to make remediation actionable (e.g. copy source vs
+/// install/service location). Fails closed on any missing, unreadable, non-regular, or
+/// mismatching file; does not silently accept unverified collateral.
+fn verify_windivert_collateral_in_dir(dir: &std::path::Path, purpose: &str) -> anyhow::Result<()> {
+    verify_windivert_collateral_in_dir_with_expected(dir, purpose, WINDIVERT_COLLATERAL_FILES)
+}
+
+fn verify_windivert_collateral_in_dir_with_expected(
+    dir: &std::path::Path,
+    purpose: &str,
+    expected_files: &[ExpectedCollateral],
+) -> anyhow::Result<()> {
+    for expected in expected_files {
+        let path = dir.join(expected.file_name);
+        let md = std::fs::symlink_metadata(&path).map_err(|e| {
+            anyhow::anyhow!(
+                "G19: cannot verify WinDivert collateral for {purpose}: required file {} is missing or not accessible: {}\n\
+                 expected a verified WinDivert 2.2.2-A x64 {} (sha256 {}) next to the executable/install source. \
+                 Place the authentic unmodified file in {} or reinstall Bosphorus from a trusted release package.",
+                path.display(),
+                e,
+                expected.file_name,
+                expected.sha256_hex,
+                dir.display()
+            )
+        })?;
+        if !md.file_type().is_file() {
+            anyhow::bail!(
+                "G19: refusing unverified WinDivert collateral for {purpose}: {} is not a regular file\n\
+                 expected a verified WinDivert 2.2.2-A x64 {} (sha256 {}). Replace it with the authentic unmodified file.",
+                path.display(),
+                expected.file_name,
+                expected.sha256_hex
+            );
+        }
+        if md.len() != expected.size_bytes {
+            anyhow::bail!(
+                "G19: refusing unverified WinDivert collateral for {purpose}: {} has unexpected size {} bytes (expected {} bytes)\n\
+                 expected WinDivert 2.2.2-A x64 {} (sha256 {}). The file does not match the pinned provenance and will not be copied/used.",
+                path.display(),
+                md.len(),
+                expected.size_bytes,
+                expected.file_name,
+                expected.sha256_hex
+            );
+        }
+        let bytes = std::fs::read(&path).map_err(|e| {
+            anyhow::anyhow!(
+                "G19: cannot verify WinDivert collateral for {purpose}: failed to read {}: {}\n\
+                 integrity/provenance verification could not be completed; refusing to copy/use unverified collateral.",
+                path.display(),
+                e
+            )
+        })?;
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(expected.sha256_hex) {
+            anyhow::bail!(
+                "G19: refusing unverified WinDivert collateral for {purpose}: {} has SHA-256 {} but expected {}\n\
+                 the file does not match the pinned WinDivert 2.2.2-A x64 provenance for {} and will not be copied/used. \
+                 Replace it with the authentic unmodified file from a trusted Bosphorus/WinDivert 2.2.2-A source.",
+                path.display(),
+                actual,
+                expected.sha256_hex,
+                expected.file_name
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Try to load the WinDivert driver right here. If it fails now, the SYSTEM
 /// service would fail the same way at boot with no visible error.
 fn preflight_windivert(force: bool) -> anyhow::Result<()> {
@@ -1223,5 +1447,190 @@ mod tests {
         assert!(!is_allowed_service_data_location(&PathBuf::from(
             r"C:\Tools\profiles"
         )));
+    }
+
+    // --- G19: WinDivert collateral provenance/integrity ----------------------
+
+    fn g19_temp_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "bosphorus-g19-{}-{nanos}-{name}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn pinned_windivert_collateral_expectations_match_bundled_release_artifacts() {
+        assert_eq!(WINDIVERT_COLLATERAL_FILES.len(), 2);
+        assert_eq!(WINDIVERT_COLLATERAL_FILES[0].file_name, "WinDivert.dll");
+        assert_eq!(
+            WINDIVERT_COLLATERAL_FILES[0].sha256_hex,
+            "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2"
+        );
+        assert_eq!(WINDIVERT_COLLATERAL_FILES[0].size_bytes, 47616);
+        assert_eq!(WINDIVERT_COLLATERAL_FILES[1].file_name, "WinDivert64.sys");
+        assert_eq!(
+            WINDIVERT_COLLATERAL_FILES[1].sha256_hex,
+            "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2"
+        );
+        assert_eq!(WINDIVERT_COLLATERAL_FILES[1].size_bytes, 94144);
+    }
+
+    #[test]
+    fn collateral_verification_accepts_files_matching_pinned_hash_and_size() {
+        let dir = g19_temp_dir("accept");
+        let dll = b"verified-dll-content";
+        let sys = b"verified-sys-content";
+        std::fs::write(dir.join("WinDivert.dll"), dll).unwrap();
+        std::fs::write(dir.join("WinDivert64.sys"), sys).unwrap();
+        let dll_hash: &'static str = Box::leak(sha256_hex(dll).into_boxed_str());
+        let sys_hash: &'static str = Box::leak(sha256_hex(sys).into_boxed_str());
+        let expected = [
+            ExpectedCollateral {
+                file_name: "WinDivert.dll",
+                sha256_hex: dll_hash,
+                size_bytes: dll.len() as u64,
+            },
+            ExpectedCollateral {
+                file_name: "WinDivert64.sys",
+                sha256_hex: sys_hash,
+                size_bytes: sys.len() as u64,
+            },
+        ];
+        verify_windivert_collateral_in_dir_with_expected(&dir, "test install source", &expected)
+            .expect("matching collateral must be accepted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collateral_verification_rejects_missing_file_fail_closed() {
+        let dir = g19_temp_dir("missing");
+        let dll = b"verified-dll-content";
+        std::fs::write(dir.join("WinDivert.dll"), dll).unwrap();
+        let dll_hash: &'static str = Box::leak(sha256_hex(dll).into_boxed_str());
+        let expected = [
+            ExpectedCollateral {
+                file_name: "WinDivert.dll",
+                sha256_hex: dll_hash,
+                size_bytes: dll.len() as u64,
+            },
+            ExpectedCollateral {
+                file_name: "WinDivert64.sys",
+                sha256_hex: "00",
+                size_bytes: 1,
+            },
+        ];
+        let err = verify_windivert_collateral_in_dir_with_expected(
+            &dir,
+            "test install source",
+            &expected,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("G19"), "missing G19 context: {msg}");
+        assert!(
+            msg.contains("WinDivert64.sys"),
+            "must identify missing file: {msg}"
+        );
+        assert!(
+            msg.contains("missing or not accessible"),
+            "must fail closed on missing file: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collateral_verification_rejects_size_mismatch_fail_closed() {
+        let dir = g19_temp_dir("size");
+        let dll = b"verified-dll-content";
+        let sys = b"verified-sys-content";
+        std::fs::write(dir.join("WinDivert.dll"), dll).unwrap();
+        std::fs::write(dir.join("WinDivert64.sys"), sys).unwrap();
+        let dll_hash: &'static str = Box::leak(sha256_hex(dll).into_boxed_str());
+        let sys_hash: &'static str = Box::leak(sha256_hex(sys).into_boxed_str());
+        let expected = [
+            ExpectedCollateral {
+                file_name: "WinDivert.dll",
+                sha256_hex: dll_hash,
+                size_bytes: dll.len() as u64,
+            },
+            ExpectedCollateral {
+                file_name: "WinDivert64.sys",
+                sha256_hex: sys_hash,
+                size_bytes: (sys.len() as u64) + 1,
+            },
+        ];
+        let err = verify_windivert_collateral_in_dir_with_expected(
+            &dir,
+            "test install source",
+            &expected,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("G19"), "missing G19 context: {msg}");
+        assert!(
+            msg.contains("unexpected size"),
+            "must report size mismatch: {msg}"
+        );
+        assert!(
+            msg.contains("WinDivert64.sys"),
+            "must identify mismatching file: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn collateral_verification_rejects_hash_mismatch_fail_closed() {
+        let dir = g19_temp_dir("hash");
+        let dll = b"verified-dll-content";
+        let sys = b"tampered-sys-content";
+        std::fs::write(dir.join("WinDivert.dll"), dll).unwrap();
+        std::fs::write(dir.join("WinDivert64.sys"), sys).unwrap();
+        let dll_hash: &'static str = Box::leak(sha256_hex(dll).into_boxed_str());
+        let wrong_hash: &'static str =
+            Box::leak(sha256_hex(b"different-expected-content").into_boxed_str());
+        let expected = [
+            ExpectedCollateral {
+                file_name: "WinDivert.dll",
+                sha256_hex: dll_hash,
+                size_bytes: dll.len() as u64,
+            },
+            ExpectedCollateral {
+                file_name: "WinDivert64.sys",
+                sha256_hex: wrong_hash,
+                size_bytes: sys.len() as u64,
+            },
+        ];
+        let err = verify_windivert_collateral_in_dir_with_expected(
+            &dir,
+            "test install source",
+            &expected,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("G19"), "missing G19 context: {msg}");
+        assert!(msg.contains("SHA-256"), "must report hash mismatch: {msg}");
+        assert!(
+            msg.contains("will not be copied/used"),
+            "must fail closed: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
