@@ -86,7 +86,11 @@ impl PacketBuilder {
 
     /// Keep only the first `keep` payload bytes (fragment part 0).
     pub fn truncate_payload(&mut self, keep: usize) -> Result<&mut Self, CoreError> {
-        let end = (self.payload_start + keep).min(self.buf.len());
+        let end = self
+            .payload_start
+            .checked_add(keep)
+            .ok_or(CoreError::PacketTooLarge)?
+            .min(self.buf.len());
         Self::validate_ip_len(end, self.ipv6)?;
         self.buf.truncate(end);
         self.write_ip_length(end);
@@ -96,14 +100,19 @@ impl PacketBuilder {
     /// Drop the first `start` payload bytes, keeping the rest (fragment part 1).
     /// The caller is responsible for bumping the TCP sequence number by `start`.
     pub fn slice_payload_from(&mut self, start: usize) -> Result<&mut Self, CoreError> {
-        let cut = (self.payload_start + start).min(self.buf.len());
+        let cut = self
+            .payload_start
+            .checked_add(start)
+            .ok_or(CoreError::PacketTooLarge)?
+            .min(self.buf.len());
         let new_len = self
-            .buf
-            .len()
-            .saturating_sub(cut.saturating_sub(self.payload_start));
+            .payload_start
+            .checked_add(self.buf.len().saturating_sub(cut))
+            .ok_or(CoreError::PacketTooLarge)?;
         Self::validate_ip_len(new_len, self.ipv6)?;
         self.buf.drain(self.payload_start..cut);
-        self.write_ip_length(self.buf.len());
+        debug_assert_eq!(self.buf.len(), new_len);
+        self.write_ip_length(new_len);
         Ok(self)
     }
 
