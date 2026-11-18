@@ -57,6 +57,10 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     println!("{}", crate::i18n::t(crate::i18n::Msg::DiscoveryWarning));
     println!();
 
+    if let Some(profile_dir) = &opts.profile_dir {
+        validate_service_profile_dir(profile_dir)?;
+    }
+
     let exe = resolve_exe(opts)?;
     preflight_windivert(opts.force)?;
 
@@ -131,6 +135,10 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
 
 /// The `service run` argv the SCM launches the service with. Kept separate
 /// from [`install`] so it can be unit-tested without touching the SCM.
+///
+/// Callers that persist these arguments for the elevated service must ensure any
+/// explicit `--profile-dir` has been accepted by [`validate_service_profile_dir`]
+/// (G13: do not persist arbitrary service data paths).
 fn build_launch_arguments(opts: &Opts) -> Vec<OsString> {
     let mut v: Vec<OsString> = vec![
         "service".into(),
@@ -665,6 +673,90 @@ fn is_trusted_service_program_location(path: &std::path::Path) -> bool {
     false
 }
 
+/// Validate that an explicit `--profile-dir` is safe to persist and use as a
+/// LocalSystem service data path (G13).
+///
+/// The service reads/writes discovery profiles (and is colocated with service data
+/// under the default ProgramData location). Persisting an arbitrary attacker-chosen
+/// path can direct service reads/writes to unsafe locations (tampering/leakage).
+/// Policy (lexical, fail closed): require an absolute local drive path, reject
+/// UNC/device/relative/empty paths, reject paths under obviously unsafe or
+/// user-writable/transient locations, and require the path to reside under a
+/// protected service data/program location (ProgramData or Program Files /
+/// Program Files (x86)). The default service profile directory is preserved.
+/// Windows ACL/owner/reparse behavior of the chosen directory contents is out of
+/// scope for this lexical check and is SUSPECTED/unverified on non-Windows hosts.
+fn validate_service_profile_dir(path: &std::path::Path) -> anyhow::Result<()> {
+    let raw = path.to_string_lossy();
+    if raw.trim().is_empty() {
+        anyhow::bail!(
+            "refusing to use an empty --profile-dir for the LocalSystem service; \
+             choose a protected data path such as {}",
+            super::profiles_dir().display()
+        );
+    }
+
+    if !is_absolute_local_service_path(path) {
+        anyhow::bail!(
+            "refusing to use a non-absolute or non-local --profile-dir for the LocalSystem service: {}\n\
+             --profile-dir must be an absolute local drive path (for example under C:\\ProgramData\\Bosphorus\\profiles). \
+             UNC/device/relative paths are not accepted for persisted service data paths",
+            path.display()
+        );
+    }
+
+    if let Some(reason) = unsafe_install_target_reason(path) {
+        anyhow::bail!(
+            "refusing to use an unsafe --profile-dir for the LocalSystem service ({}): {}\n\
+             choose a protected service data path such as {}",
+            reason,
+            path.display(),
+            super::profiles_dir().display()
+        );
+    }
+
+    if !is_allowed_service_data_location(path) {
+        anyhow::bail!(
+            "refusing to use --profile-dir outside protected service locations: {}\n\
+             explicit profile directories must reside under ProgramData or a protected program location \
+             (Program Files / Program Files (x86)), for example {}",
+            path.display(),
+            super::profiles_dir().display()
+        );
+    }
+
+    Ok(())
+}
+
+/// True for an absolute local drive path suitable for a persisted service path.
+/// Rejects relative paths and UNC/device/verbatim paths (`\\...\`), which are
+/// risky or ambiguous for LocalSystem service arguments. Accepts Windows drive-
+/// absolute forms (`C:\...`) even when checked on non-Windows hosts so policy
+/// tests remain runnable on Linux (Windows runtime path semantics SUSPECTED).
+fn is_absolute_local_service_path(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    if s.starts_with("\\\\") {
+        return false;
+    }
+    if path.is_absolute() {
+        return !s.starts_with("\\\\");
+    }
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// True if `path` is under a protected location appropriate for persisted service
+/// data/profile paths (G13 lexical policy): ProgramData or a trusted program
+/// location.
+fn is_allowed_service_data_location(path: &std::path::Path) -> bool {
+    is_program_data_location(path) || is_trusted_service_program_location(path)
+}
+
+/// Lexical check for paths under a `ProgramData` directory component.
+fn is_program_data_location(path: &std::path::Path) -> bool {
+    contains_policy_segment(&normalized_policy_path(path), "\\programdata\\")
+}
+
 /// Lowercased path string with separators normalized for lexical policy checks.
 /// A trailing separator is appended so segment markers like `\temp\` match terminal dirs.
 fn normalized_policy_path(path: &std::path::Path) -> String {
@@ -1019,5 +1111,117 @@ mod tests {
             "missing fail-closed reason: {msg}"
         );
         assert!(msg.contains("G3"), "missing G3 context: {msg}");
+    }
+
+    // --- G13: service profile-dir validation ---------------------------------
+
+    #[test]
+    fn accepts_explicit_profile_dir_under_protected_service_data_locations() {
+        for p in [
+            r"C:\ProgramData\Bosphorus\profiles",
+            r"C:\ProgramData\Bosphorus\profiles\custom",
+            r"c:\programdata\CustomBosphorus",
+            r"C:\Program Files\Bosphorus\profiles",
+            r"C:\Program Files (x86)\Bosphorus\data",
+        ] {
+            let path = PathBuf::from(p);
+            validate_service_profile_dir(&path)
+                .unwrap_or_else(|e| panic!("expected accepted profile dir {p}: {e}"));
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_or_user_writable_profile_dirs() {
+        for p in [
+            r"C:\Users\alice\Downloads\profiles",
+            r"C:\Users\alice\Desktop\profiles",
+            r"C:\Users\alice\AppData\Local\Temp\profiles",
+            r"C:\Temp\profiles",
+            r"C:\Windows\Temp\profiles",
+            r"C:\build\target\release\profiles",
+            r"D:\work\target\debug\profiles",
+            r"C:\Users\alice\profiles",
+            "/tmp/profiles",
+            "/home/alice/profiles",
+        ] {
+            let err = validate_service_profile_dir(&PathBuf::from(p)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--profile-dir"),
+                "expected actionable --profile-dir guidance for {p}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_profile_dirs_outside_protected_locations_even_if_not_obviously_transient() {
+        for p in [
+            r"C:\Tools\profiles",
+            r"D:\Bosphorus\profiles",
+            r"C:\Bosphorus\profiles",
+            r"C:\Opt\profiles",
+            r"D:\Data\profiles",
+        ] {
+            let path = PathBuf::from(p);
+            assert!(
+                unsafe_install_target_reason(&path).is_none(),
+                "not in unsafe marker set: {p}"
+            );
+            let err = validate_service_profile_dir(&path).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("outside protected service locations"),
+                "expected protected-location rejection for {p}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_absolute_non_local_or_empty_profile_dirs() {
+        for p in [
+            "",
+            "profiles",
+            r"relative\profiles",
+            r".\profiles",
+            r"..\profiles",
+            r"\\server\share\profiles",
+            r"\\?\C:\ProgramData\Bosphorus\profiles",
+        ] {
+            let err = validate_service_profile_dir(&PathBuf::from(p)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--profile-dir") || msg.contains("empty"),
+                "expected actionable rejection for profile dir '{p}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_dir_policy_helpers_distinguish_local_drive_and_program_data() {
+        assert!(is_absolute_local_service_path(&PathBuf::from(
+            r"C:\ProgramData\Bosphorus\profiles"
+        )));
+        assert!(!is_absolute_local_service_path(&PathBuf::from(
+            r"\\server\share\profiles"
+        )));
+        assert!(!is_absolute_local_service_path(&PathBuf::from(
+            r"relative\profiles"
+        )));
+        assert!(is_program_data_location(&PathBuf::from(
+            r"C:\ProgramData\Bosphorus\profiles"
+        )));
+        assert!(is_program_data_location(&PathBuf::from(r"c:\programdata")));
+        assert!(!is_program_data_location(&PathBuf::from(
+            r"C:\Program Files\Bosphorus"
+        )));
+        assert!(is_allowed_service_data_location(&PathBuf::from(
+            r"C:\ProgramData\Bosphorus\profiles"
+        )));
+        assert!(is_allowed_service_data_location(&PathBuf::from(
+            r"C:\Program Files\Bosphorus\profiles"
+        )));
+        assert!(!is_allowed_service_data_location(&PathBuf::from(
+            r"C:\Tools\profiles"
+        )));
     }
 }
