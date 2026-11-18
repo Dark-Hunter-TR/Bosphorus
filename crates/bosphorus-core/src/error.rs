@@ -5,6 +5,8 @@ pub enum CoreError {
     Parse(&'static str),
     #[error("packet too short for the requested operation")]
     ShortPacket,
+    #[error("packet length exceeds representable IP header field")]
+    PacketTooLarge,
     #[error("filter build: {0}")]
     Filter(String),
     #[error("config: {0}")]

@@ -81,33 +81,40 @@ pub fn build_fake(
 ) -> Result<(Vec<u8>, ChecksumOp), CoreError> {
     let payload: Vec<u8> = match spec.payload {
         FakePayload::StaticClientHello => FAKE_HTTPS_REQUEST.to_vec(),
-        FakePayload::AggressiveClientHello => aggressive_fake_https_request()
-            .ok_or(CoreError::Parse("aggressive fake: failed to pad FAKE_HTTPS_REQUEST"))?,
+        FakePayload::AggressiveClientHello => aggressive_fake_https_request().ok_or(
+            CoreError::Parse("aggressive fake: failed to pad FAKE_HTTPS_REQUEST"),
+        )?,
     };
 
     let mut b = PacketBuilder::from_view(orig);
-    b.replace_payload(&payload);
+    b.replace_payload(&payload)?;
 
-    let parts = spec
-        .desync
-        .parts()
-        .ok_or(CoreError::Parse("build_fake called for a non-fake desync method"))?;
+    let parts = spec.desync.parts().ok_or(CoreError::Parse(
+        "build_fake called for a non-fake desync method",
+    ))?;
 
     if let Some((seq_delta, ack_delta)) = parts.seq_shift {
-        let seq = orig.tcp_seq().ok_or(CoreError::Parse("fake: not a TCP packet"))?;
-        let ack = orig.tcp_ack().ok_or(CoreError::Parse("fake: not a TCP packet"))?;
+        let seq = orig
+            .tcp_seq()
+            .ok_or(CoreError::Parse("fake: not a TCP packet"))?;
+        let ack = orig
+            .tcp_ack()
+            .ok_or(CoreError::Parse("fake: not a TCP packet"))?;
         b.set_tcp_seq(add_delta(seq, seq_delta))?;
         b.set_tcp_ack(add_delta(ack, ack_delta))?;
     }
 
     if parts.set_ttl {
-        let policy = spec.ttl.ok_or(CoreError::Parse("fake: TtlLimited needs a ttl policy"))?;
+        let policy = spec
+            .ttl
+            .ok_or(CoreError::Parse("fake: TtlLimited needs a ttl policy"))?;
         let policy = match (policy, discovered_ttl) {
             (TtlPolicy::AutoHeuristic { .. }, Some(measured)) => TtlPolicy::Discovered(measured),
             _ => policy,
         };
-        let ttl = resolve_ttl(&policy, hops_to_server)
-            .ok_or(CoreError::Parse("fake: ttl policy unresolved (no SYN-ACK hop count yet)"))?;
+        let ttl = resolve_ttl(&policy, hops_to_server).ok_or(CoreError::Parse(
+            "fake: ttl policy unresolved (no SYN-ACK hop count yet)",
+        ))?;
         b.set_ttl(ttl);
     }
 
@@ -122,10 +129,14 @@ pub fn build_fake(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::model::{DesyncMethod, FakePayload, FakeSpec, SEQ_DELTA, ACK_DELTA, TtlPolicy};
+    use crate::strategy::model::{
+        DesyncMethod, FakePayload, FakeSpec, TtlPolicy, ACK_DELTA, SEQ_DELTA,
+    };
 
     fn clienthello_pkt(seq: u32, ack: u32, ttl: u8) -> Vec<u8> {
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, ttl, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, ttl, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&seq.to_be_bytes());
         p.extend_from_slice(&ack.to_be_bytes());
@@ -137,7 +148,12 @@ mod tests {
     }
 
     fn spec(desync: DesyncMethod, ttl: Option<TtlPolicy>) -> FakeSpec {
-        FakeSpec { desync, ttl, payload: FakePayload::StaticClientHello, repeats: 1 }
+        FakeSpec {
+            desync,
+            ttl,
+            payload: FakePayload::StaticClientHello,
+            repeats: 1,
+        }
     }
 
     #[test]
@@ -150,12 +166,23 @@ mod tests {
     #[test]
     fn aggressive_fake_is_padded_and_still_well_formed() {
         let padded = aggressive_fake_https_request().expect("FAKE_HTTPS_REQUEST pads cleanly");
-        assert_eq!(padded.len(), FAKE_HTTPS_REQUEST.len() + 4 + AGGRESSIVE_PAD_EXTRA as usize);
+        assert_eq!(
+            padded.len(),
+            FAKE_HTTPS_REQUEST.len() + 4 + AGGRESSIVE_PAD_EXTRA as usize
+        );
         let rec_len = u16::from_be_bytes([padded[3], padded[4]]);
-        assert_eq!(rec_len as usize + 5, padded.len(), "record-length field grown to match");
+        assert_eq!(
+            rec_len as usize + 5,
+            padded.len(),
+            "record-length field grown to match"
+        );
         // Original bytes preceding the new extension are untouched except the
         // three length fields `add_padding_extension` legitimately rewrites.
-        assert_eq!(&padded[9..11], &FAKE_HTTPS_REQUEST[9..11], "client_version unchanged");
+        assert_eq!(
+            &padded[9..11],
+            &FAKE_HTTPS_REQUEST[9..11],
+            "client_version unchanged"
+        );
         assert_eq!(
             &padded[FAKE_HTTPS_REQUEST.len()..FAKE_HTTPS_REQUEST.len() + 2],
             &0x0015u16.to_be_bytes(),
@@ -168,14 +195,20 @@ mod tests {
         let v = clienthello_pkt(1_000_000, 2_000_000, 64);
         let v = PacketView::parse(&v).unwrap();
         let s = FakeSpec {
-            desync: DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA },
+            desync: DesyncMethod::WrongSeq {
+                seq_delta: SEQ_DELTA,
+                ack_delta: ACK_DELTA,
+            },
             ttl: None,
             payload: FakePayload::AggressiveClientHello,
             repeats: 1,
         };
         let (fake, op) = build_fake(&s, &v, None, None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
-        assert_eq!(fv.payload().len(), FAKE_HTTPS_REQUEST.len() + 4 + AGGRESSIVE_PAD_EXTRA as usize);
+        assert_eq!(
+            fv.payload().len(),
+            FAKE_HTTPS_REQUEST.len() + 4 + AGGRESSIVE_PAD_EXTRA as usize
+        );
         assert_eq!(fv.tcp_seq(), Some(1_000_000 - 10_000));
         assert_eq!(op, ChecksumOp::Recompute);
     }
@@ -185,7 +218,13 @@ mod tests {
         let v = clienthello_pkt(1_000_000, 2_000_000, 64);
         let v = PacketView::parse(&v).unwrap();
         let (fake, op) = build_fake(
-            &spec(DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA }, None),
+            &spec(
+                DesyncMethod::WrongSeq {
+                    seq_delta: SEQ_DELTA,
+                    ack_delta: ACK_DELTA,
+                },
+                None,
+            ),
             &v,
             None,
             None,
@@ -203,7 +242,8 @@ mod tests {
     fn wrong_checksum_flags_break_op() {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
-        let (fake, op) = build_fake(&spec(DesyncMethod::WrongChecksum, None), &v, None, None).unwrap();
+        let (fake, op) =
+            build_fake(&spec(DesyncMethod::WrongChecksum, None), &v, None, None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
         assert_eq!(fv.tcp_seq(), Some(1)); // no shift
         assert_eq!(op, ChecksumOp::RecomputeThenBreakTcp);
@@ -213,8 +253,13 @@ mod tests {
     fn ttl_limited_sets_ttl_from_hops() {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
-        let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
-        let (fake, op) = build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
+        let p = TtlPolicy::AutoHeuristic {
+            delta: 4,
+            min: 3,
+            max: 10,
+        };
+        let (fake, op) =
+            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
         let fv = PacketView::parse(&fake).unwrap();
         assert_eq!(fv.ttl(), 7); // 11 - 4
         assert_eq!(op, ChecksumOp::Recompute);
@@ -224,7 +269,11 @@ mod tests {
     fn ttl_limited_without_hops_errors_not_panics() {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
-        let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
+        let p = TtlPolicy::AutoHeuristic {
+            delta: 4,
+            min: 3,
+            max: 10,
+        };
         assert!(build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, None, None).is_err());
     }
 
@@ -232,14 +281,24 @@ mod tests {
     fn discovered_ttl_overrides_the_auto_heuristic() {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
-        let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
+        let p = TtlPolicy::AutoHeuristic {
+            delta: 4,
+            min: 3,
+            max: 10,
+        };
         // Heuristic alone: 11 - 4 = 7.
-        let (fake, _) = build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
+        let (fake, _) =
+            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), None).unwrap();
         assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 7);
         // A measured injector distance of 2 hops wins outright — no delta, no
         // dependence on `hops_to_server` at all (irrelevant here, still Some(11)).
-        let (fake, _) =
-            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), Some(2)).unwrap();
+        let (fake, _) = build_fake(
+            &spec(DesyncMethod::TtlLimited, Some(p)),
+            &v,
+            Some(11),
+            Some(2),
+        )
+        .unwrap();
         assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 2);
         // Even with no hop count at all, a measured value alone is enough.
         let (fake, _) =
@@ -252,9 +311,18 @@ mod tests {
         let v = clienthello_pkt(1, 1, 64);
         let v = PacketView::parse(&v).unwrap();
         let p = TtlPolicy::UserFixed(9);
-        let (fake, _) =
-            build_fake(&spec(DesyncMethod::TtlLimited, Some(p)), &v, Some(11), Some(2)).unwrap();
-        assert_eq!(PacketView::parse(&fake).unwrap().ttl(), 9, "explicit override always wins");
+        let (fake, _) = build_fake(
+            &spec(DesyncMethod::TtlLimited, Some(p)),
+            &v,
+            Some(11),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(
+            PacketView::parse(&fake).unwrap().ttl(),
+            9,
+            "explicit override always wins"
+        );
     }
 
     #[test]
@@ -264,7 +332,13 @@ mod tests {
         let p = TtlPolicy::UserFixed(5);
 
         let (f1, o1) = build_fake(
-            &spec(DesyncMethod::SeqPlusTtl { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA }, Some(p)),
+            &spec(
+                DesyncMethod::SeqPlusTtl {
+                    seq_delta: SEQ_DELTA,
+                    ack_delta: ACK_DELTA,
+                },
+                Some(p),
+            ),
             &v,
             None,
             None,
@@ -275,7 +349,13 @@ mod tests {
         assert_eq!(v1.ttl(), 5);
         assert_eq!(o1, ChecksumOp::Recompute);
 
-        let (_f2, o2) = build_fake(&spec(DesyncMethod::ChecksumPlusTtl, Some(p)), &v, None, None).unwrap();
+        let (_f2, o2) = build_fake(
+            &spec(DesyncMethod::ChecksumPlusTtl, Some(p)),
+            &v,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(o2, ChecksumOp::RecomputeThenBreakTcp);
     }
 }
