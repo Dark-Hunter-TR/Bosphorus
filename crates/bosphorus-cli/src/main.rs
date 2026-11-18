@@ -28,10 +28,10 @@ mod logging;
 mod mem_bench;
 mod netkey;
 mod netwatch;
+mod observe;
 mod passthru;
 mod selftest;
 mod selftest_m7;
-mod observe;
 mod service;
 
 use engine_cmd::StrategyArg;
@@ -61,23 +61,39 @@ pub(crate) fn usage() {
     eprintln!();
     eprintln!("  --strategy list           print the default discovery grid");
     eprintln!("  --strategy grid:<i>       run grid entry i");
-    eprintln!("  --strategy <frag>[/<d>]   frag = <anchor>[,<anchor>...]|none  (list = multi-part)");
+    eprintln!(
+        "  --strategy <frag>[/<d>]   frag = <anchor>[,<anchor>...]|none  (list = multi-part)"
+    );
     eprintln!("                            anchor = <u16>|sni|sni-mid|tls");
-    eprintln!("                            d    = wrongseq|wrongsum|ttl:<u8>|none  (default wrongseq)");
+    eprintln!(
+        "                            d    = wrongseq|wrongsum|ttl:<u8>|none  (default wrongseq)"
+    );
     eprintln!("  --strategy overlap:<sq>/<anchor>   forced OverlapDisorder (disorder + seqovl)");
     eprintln!("  --enable-overlap         opt auto-discovery into OverlapDisorder (default OFF)");
-    eprintln!("  --quic off|blocked|all   HTTP/3 handling (default: blocked). blocked refuses QUIC");
-    eprintln!("                           only towards destinations caught being censored, so those");
-    eprintln!("                           sites fall back to TCP where a strategy exists; all refuses");
+    eprintln!(
+        "  --quic off|blocked|all   HTTP/3 handling (default: blocked). blocked refuses QUIC"
+    );
+    eprintln!(
+        "                           only towards destinations caught being censored, so those"
+    );
+    eprintln!(
+        "                           sites fall back to TCP where a strategy exists; all refuses"
+    );
     eprintln!("                           every QUIC connection; off leaves HTTP/3 alone");
     eprintln!("  --profile-dir DIR        read/write discovery profiles here instead of");
     eprintln!("                           %LOCALAPPDATA%\\Bosphorus\\profiles (e.g. the service's");
     eprintln!("                           %ProgramData%\\Bosphorus\\profiles store)");
     eprintln!("  --isp NAME               opt into the cross-network ISP seed pool: seed a fresh");
-    eprintln!("                           network's sweep from what other networks you tagged NAME");
-    eprintln!("                           settled on (discovery mode only; derived, safe to delete)");
+    eprintln!(
+        "                           network's sweep from what other networks you tagged NAME"
+    );
+    eprintln!(
+        "                           settled on (discovery mode only; derived, safe to delete)"
+    );
     eprintln!("  --lang en|tr             message language (default: English, or Turkish if the");
-    eprintln!("                           Windows UI language is Turkish; BOSPHORUS_LANG also works)");
+    eprintln!(
+        "                           Windows UI language is Turkish; BOSPHORUS_LANG also works)"
+    );
     eprintln!("  --version, -V            print the version and exit");
 }
 
@@ -105,13 +121,35 @@ fn resolve_lang(args: &[String]) -> i18n::Lang {
     if let Some(l) = value_after(args, "--lang").and_then(i18n::parse) {
         return l;
     }
-    if let Some(l) = std::env::var("BOSPHORUS_LANG").ok().as_deref().and_then(i18n::parse) {
+    if let Some(l) = std::env::var("BOSPHORUS_LANG")
+        .ok()
+        .as_deref()
+        .and_then(i18n::parse)
+    {
         return l;
     }
     if windows_ui_is_turkish() {
         return i18n::Lang::Tr;
     }
     i18n::Lang::En
+}
+
+/// Resolve `--secs N`. Absent means unbounded/defaulted by the caller; a present
+/// but missing or non-integer value is a CLI error so we never silently run
+/// forever when the user asked for a time limit.
+fn parse_secs(args: &[String]) -> anyhow::Result<Option<u64>> {
+    let Some(i) = args.iter().position(|a| a == "--secs") else {
+        return Ok(None);
+    };
+    let Some(s) = args.get(i + 1) else {
+        anyhow::bail!("--secs requires a value (number of seconds)");
+    };
+    let n: u64 = s.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid value for --secs: '{s}' (expected a non-negative integer number of seconds)"
+        )
+    })?;
+    Ok(Some(n))
 }
 
 /// `PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_TURKISH`.
@@ -159,7 +197,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     i18n::set(resolve_lang(&args));
-    let secs = value_after(&args, "--secs").and_then(|s| s.parse::<u64>().ok());
+    let secs = parse_secs(&args)?;
     let enable_overlap = args.iter().any(|a| a == "--enable-overlap");
     let profile_dir = value_after(&args, "--profile-dir").map(std::path::PathBuf::from);
     let isp = value_after(&args, "--isp").map(str::to_owned);
@@ -173,7 +211,9 @@ fn main() -> anyhow::Result<()> {
         Some("--check-filters") => engine_cmd::check_filters(),
         Some("--discovery-demo") => engine_cmd::discovery_demo(args.iter().any(|a| a == "--fresh")),
         Some("--mem-bench") => {
-            let n = value_after(&args, "--mem-bench").and_then(|s| s.parse().ok()).unwrap_or(2000);
+            let n = value_after(&args, "--mem-bench")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2000);
             mem_bench::run(n)
         }
         Some("--observe") => observe::run(secs.unwrap_or(60)),
@@ -202,5 +242,42 @@ fn main() -> anyhow::Result<()> {
             usage();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_secs;
+
+    fn args(rest: &[&str]) -> Vec<String> {
+        rest.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn secs_absent_is_none() {
+        assert_eq!(parse_secs(&args(&["--engine"])).unwrap(), None);
+    }
+
+    #[test]
+    fn secs_valid_parses() {
+        assert_eq!(
+            parse_secs(&args(&["--engine", "--secs", "10"])).unwrap(),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn secs_invalid_value_is_error() {
+        let err = parse_secs(&args(&["--engine", "--secs", "abc"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--secs"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
+    }
+
+    #[test]
+    fn secs_missing_value_is_error() {
+        let err = parse_secs(&args(&["--engine", "--secs"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--secs"), "{msg}");
     }
 }
