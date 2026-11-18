@@ -32,7 +32,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         quic: crate::parse_quic(args)?,
         profile_dir: value_after(args, "--profile-dir").map(PathBuf::from),
         install_dir: value_after(args, "--install-dir").map(PathBuf::from),
-        start_demand: value_after(args, "--start").map(|s| s.eq_ignore_ascii_case("demand"))
+        start_demand: value_after(args, "--start")
+            .map(|s| s.eq_ignore_ascii_case("demand"))
             .unwrap_or(false),
         force: args.iter().any(|a| a == "--force"),
     };
@@ -40,7 +41,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // Elevated re-spawn from the double-click launcher: its console is hidden,
     // so also surface the outcome in a MessageBox.
-    let from_launcher = args.iter().any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG);
+    let from_launcher = args
+        .iter()
+        .any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG);
     let res = install(&opts);
     if from_launcher {
         crate::launcher::show_install_result(&res);
@@ -103,9 +106,18 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
         reboot_msg: None,
         command: None,
         actions: Some(vec![
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
-            ServiceAction { action_type: ServiceActionType::None, delay: Duration::ZERO },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(30),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::None,
+                delay: Duration::ZERO,
+            },
         ]),
     });
     let _ = svc.set_failure_actions_on_non_crash_failures(true);
@@ -149,19 +161,31 @@ fn lang_code(l: crate::i18n::Lang) -> &'static str {
 }
 
 fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// Absolute path to register as the service binary. `--install-dir` copies the
 /// exe + the two WinDivert files there and points at the copy.
+///
+/// G1: a LocalSystem service must not run from a user-writable/transient
+/// location. When no install dir is given, the current exe must already reside
+/// in a trusted install location; when an install dir is given, that destination
+/// must be a trusted install location (never a transient/user-profile/temp path).
 fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe()?;
     let Some(dst_dir) = &opts.install_dir else {
-        warn_if_transient(&current);
+        validate_service_install_target(&current, false)?;
         return Ok(current);
     };
+
+    validate_service_install_target(dst_dir, true)?;
     std::fs::create_dir_all(dst_dir)?;
-    let src_dir = current.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let src_dir = current
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let exe_dst = dst_dir.join("bosphorus.exe");
     std::fs::copy(&current, &exe_dst)?;
     for f in ["WinDivert.dll", "WinDivert64.sys"] {
@@ -169,22 +193,145 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
         if s.exists() {
             std::fs::copy(&s, dst_dir.join(f))?;
         } else {
-            eprintln!("warning: {} not found next to the exe; copy it into {} manually", f, dst_dir.display());
+            eprintln!(
+                "warning: {} not found next to the exe; copy it into {} manually",
+                f,
+                dst_dir.display()
+            );
         }
     }
     Ok(exe_dst)
 }
 
-fn warn_if_transient(p: &std::path::Path) {
-    let s = p.to_string_lossy().to_ascii_lowercase();
-    if ["\\temp\\", "\\downloads\\", "\\target\\", "\\appdata\\local\\temp"].iter().any(|m| s.contains(m)) {
-        eprintln!(
-            "warning: the exe lives at a transient-looking path:\n  {}\n\
-             move it somewhere stable (e.g. C:\\Program Files\\Bosphorus\\) or use --install-dir,\n\
-             otherwise the service (and the WinDivert driver it registers) break if the file moves.",
-            p.display()
+/// Validate that `path` is an acceptable LocalSystem service binary/install target (G1).
+///
+/// Policy (lexical, intentionally conservative without ACL/owner checks — those are G2/G3):
+/// - reject obviously transient or user-writable locations (Temp/Downloads/Desktop/AppData,
+///   user profile directories, build output/target dirs), and
+/// - require the path to reside under a trusted system program location
+///   (`Program Files` / `Program Files (x86)`), which is the standard protected location
+///   for service binaries.
+///
+/// `explicit_install_dir` controls the actionable error guidance.
+fn validate_service_install_target(
+    path: &std::path::Path,
+    explicit_install_dir: bool,
+) -> anyhow::Result<()> {
+    let raw = path.to_string_lossy();
+    if raw.trim().is_empty() {
+        anyhow::bail!("install path is empty; use --install-dir with a safe path such as C:\\Program Files\\Bosphorus");
+    }
+
+    if let Some(reason) = unsafe_install_target_reason(path) {
+        if explicit_install_dir {
+            anyhow::bail!(
+                "refusing to install the LocalSystem service into an unsafe location ({}): {}\n\
+                 choose a safe --install-dir under a protected program location, e.g. C:\\Program Files\\Bosphorus",
+                reason,
+                path.display()
+            );
+        }
+        anyhow::bail!(
+            "refusing to install the LocalSystem service from an unsafe location ({}): {}\n\
+             move the executable into a protected program location or re-run with \
+             --install-dir \"C:\\Program Files\\Bosphorus\"",
+            reason,
+            path.display()
         );
     }
+
+    if !is_trusted_service_program_location(path) {
+        if explicit_install_dir {
+            anyhow::bail!(
+                "refusing to install the LocalSystem service into a non-trusted location: {}\n\
+                 --install-dir must point to a protected program location such as \
+                 C:\\Program Files\\Bosphorus (G1 does not verify directory ACLs/ownership)",
+                path.display()
+            );
+        }
+        anyhow::bail!(
+            "refusing to install the LocalSystem service from a non-trusted location: {}\n\
+             the current executable is not in a protected program location. Move it under \
+             C:\\Program Files\\Bosphorus or re-run with --install-dir \"C:\\Program Files\\Bosphorus\"",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn unsafe_install_target_reason(path: &std::path::Path) -> Option<&'static str> {
+    let norm = normalized_policy_path(path);
+    // Order matters: report the most specific/common reason first.
+    const MARKERS: &[(&str, &str)] = &[
+        ("\\downloads\\", "user Downloads directory"),
+        ("\\desktop\\", "user Desktop directory"),
+        ("\\appdata\\", "user AppData directory"),
+        ("\\temp\\", "temporary directory"),
+        ("\\tmp\\", "temporary directory"),
+        ("\\temporary", "temporary directory"),
+        ("\\users\\", "user profile directory"),
+        ("\\recycle", "recycle bin"),
+        ("\\target\\debug", "build output directory"),
+        ("\\target\\release", "build output directory"),
+        ("\\target\\", "build output directory"),
+        ("/downloads/", "user Downloads directory"),
+        ("/desktop/", "user Desktop directory"),
+        ("/appdata/", "user AppData directory"),
+        ("/tmp/", "temporary directory"),
+        ("/var/tmp/", "temporary directory"),
+        ("/users/", "user profile directory"),
+        ("/home/", "user home directory"),
+        ("/target/debug", "build output directory"),
+        ("/target/release", "build output directory"),
+        ("/target/", "build output directory"),
+    ];
+    for (needle, reason) in MARKERS {
+        if contains_policy_segment(&norm, needle) {
+            return Some(*reason);
+        }
+    }
+    None
+}
+
+/// True if `path` is under a trusted system program location for service binaries.
+/// This is a lexical G1 check (no ACL/owner verification; see G2/G3).
+fn is_trusted_service_program_location(path: &std::path::Path) -> bool {
+    let norm = normalized_policy_path(path);
+    const ROOTS: &[&str] = &["\\program files\\", "\\program files (x86)\\"];
+    for root in ROOTS {
+        if contains_policy_segment(&norm, root) {
+            return true;
+        }
+    }
+    // Also accept the root itself (path ends with the trusted directory name).
+    const ROOT_SUFFIXES: &[&str] = &["\\program files", "\\program files (x86)"];
+    for suffix in ROOT_SUFFIXES {
+        if norm.ends_with(suffix) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Lowercased path string with separators normalized for lexical policy checks.
+/// A trailing separator is appended so segment markers like `\temp\` match terminal dirs.
+fn normalized_policy_path(path: &std::path::Path) -> String {
+    let mut s = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    if !s.ends_with('\\') {
+        s.push('\\');
+    }
+    s
+}
+
+fn contains_policy_segment(norm_with_trailing_sep: &str, needle: &str) -> bool {
+    // `norm_with_trailing_sep` always ends with '\' (or includes normalized '/'). Most
+    // needles are written with separators; direct containment is sufficient for our
+    // marker set after normalization.
+    norm_with_trailing_sep.contains(needle)
 }
 
 /// Try to load the WinDivert driver right here. If it fails now, the SYSTEM
@@ -202,7 +349,9 @@ fn preflight_windivert(force: bool) -> anyhow::Result<()> {
             eprintln!("{}", crate::i18n::preflight_warn_forced(&e.to_string()));
             Ok(())
         }
-        Err(DivertError::Open(e)) => anyhow::bail!("{}", crate::i18n::preflight_fail(&e.to_string())),
+        Err(DivertError::Open(e)) => {
+            anyhow::bail!("{}", crate::i18n::preflight_fail(&e.to_string()))
+        }
         Err(e) if force => {
             eprintln!("pre-flight: {e} (--force)");
             Ok(())
@@ -235,7 +384,10 @@ mod tests {
     #[test]
     fn launch_arguments_minimal_is_just_service_run_lang_and_quic() {
         let v = build_launch_arguments(&opts(Lang::En, false, None));
-        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en", "--quic", "blocked"]);
+        assert_eq!(
+            as_strings(&v),
+            ["service", "run", "--lang", "en", "--quic", "blocked"]
+        );
     }
 
     #[test]
@@ -244,8 +396,15 @@ mod tests {
         assert_eq!(
             as_strings(&v),
             [
-                "service", "run", "--lang", "tr", "--enable-overlap", "--quic", "blocked",
-                "--profile-dir", r"C:\pd"
+                "service",
+                "run",
+                "--lang",
+                "tr",
+                "--enable-overlap",
+                "--quic",
+                "blocked",
+                "--profile-dir",
+                r"C:\pd"
             ]
         );
     }
@@ -256,7 +415,15 @@ mod tests {
         assert!(!v.iter().any(|o| o == "--profile-dir"));
         assert_eq!(
             as_strings(&v),
-            ["service", "run", "--lang", "en", "--enable-overlap", "--quic", "blocked"]
+            [
+                "service",
+                "run",
+                "--lang",
+                "en",
+                "--enable-overlap",
+                "--quic",
+                "blocked"
+            ]
         );
     }
 
@@ -268,7 +435,10 @@ mod tests {
             let mut o = opts(Lang::En, false, None);
             o.quic = p;
             let v = as_strings(&build_launch_arguments(&o));
-            let i = v.iter().position(|a| a == "--quic").expect("--quic present");
+            let i = v
+                .iter()
+                .position(|a| a == "--quic")
+                .expect("--quic present");
             assert_eq!(v[i + 1], p.as_str());
         }
     }
@@ -281,9 +451,114 @@ mod tests {
 
     #[test]
     fn value_after_reads_the_following_token_only() {
-        let s = ["--profile-dir".to_string(), "p".to_string(), "--force".to_string()];
+        let s = [
+            "--profile-dir".to_string(),
+            "p".to_string(),
+            "--force".to_string(),
+        ];
         assert_eq!(value_after(&s, "--profile-dir"), Some("p"));
         assert_eq!(value_after(&s, "--force"), None); // flag, nothing after
         assert_eq!(value_after(&s, "--missing"), None);
+    }
+
+    // --- G1: install target safety (lexical) ---------------------------------
+
+    #[test]
+    fn rejects_user_writable_or_transient_install_targets() {
+        for p in [
+            r"C:\Users\alice\Downloads",
+            r"C:\Users\alice\Desktop\Bosphorus",
+            r"C:\Users\alice\AppData\Local\Temp\Bosphorus",
+            r"C:\Users\alice\AppData\Roaming\Bosphorus",
+            r"C:\Temp\Bosphorus",
+            r"C:\Windows\Temp\Bosphorus",
+            r"C:\build\target\release",
+            r"D:\work\target\debug\bosphorus",
+            r"C:\Users\alice\bosphorus",
+            "/tmp/bosphorus",
+            "/home/alice/Downloads/bosphorus",
+        ] {
+            let path = PathBuf::from(p);
+            assert!(
+                unsafe_install_target_reason(&path).is_some(),
+                "expected unsafe: {p}"
+            );
+            assert!(
+                validate_service_install_target(&path, true).is_err(),
+                "explicit install-dir must reject unsafe path: {p}"
+            );
+            assert!(
+                validate_service_install_target(&path, false).is_err(),
+                "implicit current-exe location must reject unsafe path: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_trusted_program_files_install_targets() {
+        for p in [
+            r"C:\Program Files\Bosphorus",
+            r"C:\Program Files (x86)\Bosphorus",
+            r"D:\Program Files\Bosphorus",
+            r"c:\program files\Custom Folder\Bosphorus",
+            r"C:\Program Files",
+        ] {
+            let path = PathBuf::from(p);
+            assert!(
+                unsafe_install_target_reason(&path).is_none(),
+                "expected not-unsafe: {p}"
+            );
+            assert!(
+                is_trusted_service_program_location(&path),
+                "expected trusted: {p}"
+            );
+            validate_service_install_target(&path, true)
+                .unwrap_or_else(|e| panic!("explicit install-dir should accept {p}: {e}"));
+            validate_service_install_target(&path, false)
+                .unwrap_or_else(|e| panic!("implicit trusted location should accept {p}: {e}"));
+        }
+    }
+
+    #[test]
+    fn rejects_non_trusted_locations_even_if_not_obviously_transient() {
+        // Without ACL/owner verification (G2/G3), arbitrary locations are not
+        // accepted as safe LocalSystem service binary targets.
+        for p in [
+            r"C:\Tools\Bosphorus",
+            r"D:\Bosphorus",
+            r"C:\Bosphorus",
+            r"C:\Opt\Bosphorus",
+        ] {
+            let path = PathBuf::from(p);
+            assert!(
+                unsafe_install_target_reason(&path).is_none(),
+                "not in unsafe marker set: {p}"
+            );
+            assert!(
+                !is_trusted_service_program_location(&path),
+                "expected non-trusted: {p}"
+            );
+            let err = validate_service_install_target(&path, true).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--install-dir"),
+                "actionable guidance expected for {p}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_unsafe_location_error_mentions_install_dir_guidance() {
+        let err = validate_service_install_target(
+            &PathBuf::from(r"C:\Users\alice\Downloads\bosphorus.exe"),
+            false,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--install-dir"), "missing guidance: {msg}");
+        assert!(
+            msg.contains("unsafe location"),
+            "missing reason context: {msg}"
+        );
     }
 }
