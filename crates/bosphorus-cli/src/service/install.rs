@@ -183,13 +183,13 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
         let install_dir = current
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        validate_service_install_directory_owner(install_dir, false)?;
+        validate_service_install_ancestor_trust_chain(install_dir, false)?;
         return Ok(current);
     };
 
     validate_service_install_target(dst_dir, true)?;
     std::fs::create_dir_all(dst_dir)?;
-    validate_service_install_directory_owner(dst_dir, true)?;
+    validate_service_install_ancestor_trust_chain(dst_dir, true)?;
     let src_dir = current
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -214,8 +214,9 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
 ///
 /// Policy (lexical): reject obviously transient or user-writable locations and require
 /// the path to reside under a trusted system program location (`Program Files` /
-/// `Program Files (x86)`). G2 adds owner verification of the relevant install
-/// directory; G3 will cover ancestor-chain trust (not handled here).
+/// `Program Files (x86)`). G2 verifies the relevant install directory owner on
+/// Windows, and G3 verifies trust of the relevant ancestor-chain directories
+/// (owner/reparse checks on Windows, fail-closed when unverifiable).
 ///
 /// `explicit_install_dir` controls the actionable error guidance.
 fn validate_service_install_target(
@@ -250,7 +251,7 @@ fn validate_service_install_target(
             anyhow::bail!(
                 "refusing to install the LocalSystem service into a non-trusted location: {}\n\
                  --install-dir must point to a protected program location such as \
-                 C:\\Program Files\\Bosphorus (G2 verifies directory owner on Windows; G3 will verify ancestor trust)",
+                 C:\\Program Files\\Bosphorus (G2/G3 verify directory and ancestor trust on Windows)",
                 path.display()
             );
         }
@@ -263,6 +264,169 @@ fn validate_service_install_target(
     }
 
     Ok(())
+}
+
+/// Directories in the install path that must be trusted for a LocalSystem service
+/// binary/install directory (G3): the directory itself and every ancestor up to
+/// the filesystem root/prefix, in nearest-to-root-last order is not required, but
+/// we return them from leaf to root as produced by [`std::path::Path::ancestors`].
+fn relevant_install_ancestor_dirs(path: &std::path::Path) -> Vec<PathBuf> {
+    path.ancestors().map(PathBuf::from).collect()
+}
+
+/// Verify trust of the relevant install/service-binary directory ancestor chain (G3).
+///
+/// Policy: every directory from `install_dir` up to its filesystem root must be
+/// verifiably trusted. On Windows, each ancestor is rejected if it is a reparse
+/// point (symlink/junction/mount point, which can redirect path resolution outside
+/// the intended trusted location) or if its owner SID is not a trusted privileged
+/// principal (SYSTEM, Administrators, TrustedInstaller), reusing G2 owner-trust
+/// primitives. Any unverifiable ancestor or API failure fails closed with an
+/// actionable error identifying the affected ancestor.
+///
+/// Rationale (MCP/MS Learn): Windows service binaries run with high privilege;
+/// writable/untrusted or redirected path components can enable tampering/hijacking.
+/// `GetNamedSecurityInfoW`/security descriptors are queried per path component on
+/// Windows; reparse-point detection uses `symlink_metadata` file attributes.
+/// On non-Windows this check cannot be enforced with Windows security APIs, so it
+/// fails closed (Windows runtime behavior is SUSPECTED/unverified here).
+fn validate_service_install_ancestor_trust_chain(
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        for ancestor in relevant_install_ancestor_dirs(install_dir) {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            validate_install_ancestor_entry(&ancestor, install_dir, explicit_install_dir)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = install_dir;
+        let _ = explicit_install_dir;
+        anyhow::bail!(
+            "cannot verify install directory ancestor trust chain on this platform (G3 requires Windows security APIs and reparse-point checks); \
+             refusing to install a LocalSystem service without ancestor trust verification"
+        )
+    }
+}
+
+#[cfg(windows)]
+fn validate_install_ancestor_entry(
+    ancestor: &std::path::Path,
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+) -> anyhow::Result<()> {
+    if is_reparse_point(ancestor).map_err(|e| {
+        ancestor_verification_error(
+            ancestor,
+            install_dir,
+            explicit_install_dir,
+            &format!("cannot determine reparse-point status: {e}"),
+        )
+    })? {
+        anyhow::bail!(ancestor_untrusted_message(
+            ancestor,
+            install_dir,
+            explicit_install_dir,
+            "directory is a reparse point (symlink/junction/mount point), which is not trusted for a LocalSystem service install path (G3)"
+        ));
+    }
+
+    let owner_sid = query_directory_owner_sid(ancestor).map_err(|e| {
+        ancestor_verification_error(
+            ancestor,
+            install_dir,
+            explicit_install_dir,
+            &format!("cannot verify owner: {e}"),
+        )
+    })?;
+    if !is_trusted_install_owner_sid(&owner_sid) {
+        anyhow::bail!(ancestor_untrusted_message(
+            ancestor,
+            install_dir,
+            explicit_install_dir,
+            &format!(
+                "directory owner SID {owner_sid} is not trusted (trusted: NT AUTHORITY\\SYSTEM S-1-5-18, \
+                 BUILTIN\\Administrators S-1-5-32-544, NT SERVICE\\TrustedInstaller \
+                 S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)"
+            )
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    let md = std::fs::symlink_metadata(path)?;
+    Ok(md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+#[cfg(windows)]
+fn ancestor_verification_error(
+    ancestor: &std::path::Path,
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+    detail: &str,
+) -> anyhow::Error {
+    if explicit_install_dir {
+        anyhow::anyhow!(
+            "cannot verify trust of install path ancestor {} for --install-dir {}: {}\n\
+             refusing to install the LocalSystem service without ancestor trust verification (G3). \
+             Ensure every ancestor is a real directory under a protected program location \
+             (e.g. C:\\Program Files\\Bosphorus) with a trusted owner",
+            ancestor.display(),
+            install_dir.display(),
+            detail
+        )
+    } else {
+        anyhow::anyhow!(
+            "cannot verify trust of install path ancestor {} for {}: {}\n\
+             refusing to install the LocalSystem service from this location without ancestor trust verification (G3). \
+             Move the executable under C:\\Program Files\\Bosphorus or use --install-dir",
+            ancestor.display(),
+            install_dir.display(),
+            detail
+        )
+    }
+}
+
+#[cfg(windows)]
+fn ancestor_untrusted_message(
+    ancestor: &std::path::Path,
+    install_dir: &std::path::Path,
+    explicit_install_dir: bool,
+    reason: &str,
+) -> String {
+    if explicit_install_dir {
+        format!(
+            "refusing to install the LocalSystem service into --install-dir {} because ancestor {} is untrusted: {}\n\
+             Every ancestor of the install directory must be a trusted, non-reparse directory owned by \
+             SYSTEM, Administrators, or TrustedInstaller (G3). Choose a protected --install-dir such as \
+             C:\\Program Files\\Bosphorus",
+            install_dir.display(),
+            ancestor.display(),
+            reason
+        )
+    } else {
+        format!(
+            "refusing to install the LocalSystem service from {} because ancestor {} is untrusted: {}\n\
+             Every ancestor of the install directory must be a trusted, non-reparse directory owned by \
+             SYSTEM, Administrators, or TrustedInstaller (G3). Move the executable under \
+             C:\\Program Files\\Bosphorus or use --install-dir",
+            install_dir.display(),
+            ancestor.display(),
+            reason
+        )
+    }
 }
 
 /// Well-known SIDs accepted as trusted owners for a LocalSystem service install directory (G2).
@@ -795,5 +959,65 @@ mod tests {
             "missing fail-closed reason: {msg}"
         );
         assert!(msg.contains("G2"), "missing G2 context: {msg}");
+    }
+
+    // --- G3: install ancestor-chain trust ------------------------------------
+
+    #[test]
+    fn ancestor_chain_includes_leaf_and_progresses_to_root() {
+        let path = PathBuf::from("/opt/bosphorus/bin");
+        let chain = relevant_install_ancestor_dirs(&path);
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/opt/bosphorus/bin"),
+                PathBuf::from("/opt/bosphorus"),
+                PathBuf::from("/opt"),
+                PathBuf::from("/"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ancestor_chain_for_root_is_just_root() {
+        let path = PathBuf::from("/");
+        let chain = relevant_install_ancestor_dirs(&path);
+        assert_eq!(chain, vec![PathBuf::from("/")]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_ancestor_trust_verification_fails_closed() {
+        let err = validate_service_install_ancestor_trust_chain(
+            &PathBuf::from(r"C:\Program Files\Bosphorus"),
+            true,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot verify install directory ancestor trust chain"),
+            "missing fail-closed reason: {msg}"
+        );
+        assert!(msg.contains("G3"), "missing G3 context: {msg}");
+        assert!(
+            msg.contains("reparse-point"),
+            "missing reparse-point context: {msg}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_ancestor_trust_verification_fails_closed_for_implicit_location() {
+        let err = validate_service_install_ancestor_trust_chain(
+            &PathBuf::from(r"C:\Program Files\Bosphorus"),
+            false,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot verify install directory ancestor trust chain"),
+            "missing fail-closed reason: {msg}"
+        );
+        assert!(msg.contains("G3"), "missing G3 context: {msg}");
     }
 }
