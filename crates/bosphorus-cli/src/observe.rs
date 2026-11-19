@@ -42,7 +42,9 @@ pub fn run(secs: u64) -> anyhow::Result<()> {
     let worker = std::thread::spawn(move || capture(&hc));
     std::thread::sleep(Duration::from_secs(secs));
     let _ = h.shutdown_both();
-    let state = worker.join().map_err(|_| anyhow::anyhow!("capture worker panicked"))?;
+    let state = worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("capture worker panicked"))?;
 
     print_report(&state);
     Ok(())
@@ -75,7 +77,12 @@ struct State {
 
 fn capture(h: &WinDivertHandle) -> State {
     let mut buf = vec![0u8; BUF];
-    let mut st = State { flows: HashMap::new(), bytes_out: 0, bytes_in: 0, total_pkts: 0 };
+    let mut st = State {
+        flows: HashMap::new(),
+        bytes_out: 0,
+        bytes_in: 0,
+        total_pkts: 0,
+    };
     loop {
         match h.recv(&mut buf) {
             Ok(r) => {
@@ -129,7 +136,12 @@ fn parse(pkt: &[u8]) -> Option<L4> {
             let mut d = [0u8; 16];
             s.copy_from_slice(&pkt[8..24]);
             d.copy_from_slice(&pkt[24..40]);
-            (40usize, pkt[6], IpAddr::V6(Ipv6Addr::from(s)), IpAddr::V6(Ipv6Addr::from(d)))
+            (
+                40usize,
+                pkt[6],
+                IpAddr::V6(Ipv6Addr::from(s)),
+                IpAddr::V6(Ipv6Addr::from(d)),
+            )
         }
         _ => return None,
     };
@@ -231,7 +243,10 @@ fn observe(st: &mut State, pkt: &[u8], outbound: bool) {
     } else {
         (l4.dst_ip, l4.dst_port, l4.src_ip, l4.src_port)
     };
-    let f = st.flows.entry((l4.is_udp, cip, cport, sip, sport)).or_default();
+    let f = st
+        .flows
+        .entry((l4.is_udp, cip, cport, sip, sport))
+        .or_default();
 
     if l4.is_udp {
         if outbound {
@@ -320,7 +335,11 @@ fn print_report(st: &State) {
 
     println!("\n================ --observe SONUC (bu blogu bana yapistir) ================");
     println!("toplam paket: {}", st.total_pkts);
-    println!("toplam bayt : OUT {} KB / IN {} KB", st.bytes_out / 1024, st.bytes_in / 1024);
+    println!(
+        "toplam bayt : OUT {} KB / IN {} KB",
+        st.bytes_out / 1024,
+        st.bytes_in / 1024
+    );
     println!("akis sayisi : {}", st.flows.len());
     println!();
     println!(
@@ -350,7 +369,11 @@ fn print_report(st: &State) {
         if !r.quic_versions.is_empty() {
             detay.push_str(&format!(
                 "quicv={} ",
-                r.quic_versions.iter().map(|v| format!("0x{v:08x}")).collect::<Vec<_>>().join(",")
+                r.quic_versions
+                    .iter()
+                    .map(|v| format!("0x{v:08x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
         if !r.rst_dts.is_empty() {
@@ -372,7 +395,9 @@ fn print_report(st: &State) {
     }
     println!("{}", "=".repeat(100));
     println!("\nNot: CH = TLS ClientHello sayisi | QUIC = QUIC Initial paket sayisi");
-    println!("RST-in = sunucudan/DPI'dan gelen RST | verdict kaba: DpiReset / Blackhole / OK / mixed");
+    println!(
+        "RST-in = sunucudan/DPI'dan gelen RST | verdict kaba: DpiReset / Blackhole / OK / mixed"
+    );
 }
 
 fn trunc(s: &str, n: usize) -> String {

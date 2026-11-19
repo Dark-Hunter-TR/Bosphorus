@@ -38,7 +38,9 @@ pub fn compile_filter(filter: &CStr, layer: Layer) -> Result<(), FilterCompileEr
     } else {
         // SAFETY: on failure WinDivert points `err_str` at a static,
         // NUL-terminated string owned by the DLL; we only read it.
-        unsafe { CStr::from_ptr(err_str) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(err_str) }
+            .to_string_lossy()
+            .into_owned()
     };
     Err(FilterCompileError { pos: err_pos, msg })
 }

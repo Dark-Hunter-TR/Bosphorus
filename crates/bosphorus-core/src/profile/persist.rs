@@ -68,14 +68,25 @@ pub struct ProfileFile {
 
 impl ProfileFile {
     pub fn new(grid_signature: u64, net_key: &str, targets: Vec<PersistedTarget>) -> Self {
-        Self { version: PROFILE_VERSION, grid_signature, net_key: net_key.to_owned(), targets }
+        Self {
+            version: PROFILE_VERSION,
+            grid_signature,
+            net_key: net_key.to_owned(),
+            targets,
+        }
     }
 }
 
 pub(crate) fn sanitize(net_key: &str) -> String {
     net_key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -179,7 +190,10 @@ mod tests {
         assert_eq!(back.targets[0].injector_hops, Some(4));
         assert_eq!(back.grid_signature, 0xdead_beef);
         // No stray temp file left behind.
-        assert!(!tmp_files(dir.path()).iter().any(|_| true), "left a .tmp file");
+        assert!(
+            !tmp_files(dir.path()).iter().any(|_| true),
+            "left a .tmp file"
+        );
     }
 
     #[test]
@@ -196,7 +210,8 @@ mod tests {
             "server_initial_ttl": null,
             "grid_size_at_exhaustion": null
         }"#;
-        let pt: PersistedTarget = serde_json::from_str(json).expect("old-format target still loads");
+        let pt: PersistedTarget =
+            serde_json::from_str(json).expect("old-format target still loads");
         assert_eq!(pt.injector_hops, None);
     }
 
@@ -231,8 +246,15 @@ mod tests {
         let json = serde_json::to_vec_pretty(&sample()).unwrap();
         atomic_write_with_tag(&path, &json, "p2").unwrap();
 
-        assert_eq!(std::fs::read(&p1_tmp).unwrap(), b"P1-STAGED-BYTES", "P1's temp was clobbered");
-        assert!(load(dir.path(), key).is_some(), "P2's save produced a valid store");
+        assert_eq!(
+            std::fs::read(&p1_tmp).unwrap(),
+            b"P1-STAGED-BYTES",
+            "P1's temp was clobbered"
+        );
+        assert!(
+            load(dir.path(), key).is_some(),
+            "P2's save produced a valid store"
+        );
         // P2 cleaned up after itself; only P1's staging file remains.
         assert_eq!(tmp_files(dir.path()), vec!["net.json.p1.tmp".to_string()]);
     }

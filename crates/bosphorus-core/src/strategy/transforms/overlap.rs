@@ -58,7 +58,9 @@ mod tests {
     use crate::strategy::model::OverlapFill;
 
     fn tcp_pkt(seq: u32, payload: &[u8]) -> Vec<u8> {
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&seq.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
@@ -76,7 +78,8 @@ mod tests {
         let pkt = tcp_pkt(seq, &payload);
         let v = PacketView::parse(&pkt).unwrap();
 
-        let [a, b] = build_overlap_disorder(&v, &payload, 20, 8, OverlapFill::JunkByte(0xEE)).unwrap();
+        let [a, b] =
+            build_overlap_disorder(&v, &payload, 20, 8, OverlapFill::JunkByte(0xEE)).unwrap();
         let pa = PacketView::parse(&a).unwrap();
         let pb = PacketView::parse(&b).unwrap();
 
@@ -105,7 +108,8 @@ mod tests {
         let split = 30;
         let seqovl = 12u16;
 
-        let [a, b] = build_overlap_disorder(&v, &payload, split, seqovl, OverlapFill::Zeros).unwrap();
+        let [a, b] =
+            build_overlap_disorder(&v, &payload, split, seqovl, OverlapFill::Zeros).unwrap();
         let pa = PacketView::parse(&a).unwrap();
         let pb = PacketView::parse(&b).unwrap();
 
@@ -116,7 +120,10 @@ mod tests {
         // seg_B arrives later, overwrites [0 .. split)
         stream[..split].copy_from_slice(pb.payload());
 
-        assert_eq!(stream, payload, "last-wins reassembly reconstructs the real payload");
+        assert_eq!(
+            stream, payload,
+            "last-wins reassembly reconstructs the real payload"
+        );
     }
 
     #[test]
@@ -126,6 +133,7 @@ mod tests {
         let v = PacketView::parse(&pkt).unwrap();
         assert!(build_overlap_disorder(&v, &payload, 10, 0, OverlapFill::Zeros).is_err()); // seqovl 0
         assert!(build_overlap_disorder(&v, &payload, 10, 10, OverlapFill::Zeros).is_err()); // seqovl == split
-        assert!(build_overlap_disorder(&v, &payload, 20, 8, OverlapFill::Zeros).is_err()); // split == len
+        assert!(build_overlap_disorder(&v, &payload, 20, 8, OverlapFill::Zeros).is_err());
+        // split == len
     }
 }

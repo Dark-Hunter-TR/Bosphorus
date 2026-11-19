@@ -33,7 +33,10 @@ fn main() {
     for name in ["WinDivert.dll", "WinDivert64.sys"] {
         let from = src.join(name);
         if let Err(e) = fs::copy(&from, profile_dir.join(name)) {
-            println!("cargo:warning=could not stage {name} from {}: {e}", from.display());
+            println!(
+                "cargo:warning=could not stage {name} from {}: {e}",
+                from.display()
+            );
         }
         // best-effort: lets `cargo test` / `cargo run --example` load the dll
         let _ = fs::copy(&from, deps_dir.join(name));

@@ -295,7 +295,10 @@ mod tests {
 
         let record_len_after = u16::from_be_bytes([padded[3], padded[4]]);
         let hs_len_after = u32::from_be_bytes([0, padded[6], padded[7], padded[8]]);
-        assert_eq!(record_len_after as usize, record_len_before as usize + 4 + 512);
+        assert_eq!(
+            record_len_after as usize,
+            record_len_before as usize + 4 + 512
+        );
         assert_eq!(hs_len_after, hs_len_before + 4 + 512);
 
         // The new extension: type 0x0015, length 512, then 512 zero bytes.

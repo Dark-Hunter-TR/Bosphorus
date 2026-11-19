@@ -39,7 +39,11 @@ impl Default for CensoredIps {
 
 impl CensoredIps {
     pub fn new(ttl: Duration, capacity: usize) -> Self {
-        Self { seen: Mutex::new(HashMap::new()), ttl, capacity: capacity.max(1) }
+        Self {
+            seen: Mutex::new(HashMap::new()),
+            ttl,
+            capacity: capacity.max(1),
+        }
     }
 
     /// Record interference against `ip`, refreshing it if already known.
@@ -139,7 +143,10 @@ mod tests {
 
         c.note(ip(9), t0 + Duration::from_secs(10));
         assert_eq!(c.len(), 3, "capacity held");
-        assert!(!c.contains(&ip(0), t0 + Duration::from_secs(10)), "oldest evicted");
+        assert!(
+            !c.contains(&ip(0), t0 + Duration::from_secs(10)),
+            "oldest evicted"
+        );
         assert!(c.contains(&ip(2), t0 + Duration::from_secs(10)));
         assert!(c.contains(&ip(9), t0 + Duration::from_secs(10)));
     }

@@ -32,14 +32,24 @@ pub fn run() -> anyhow::Result<()> {
 
 fn service_main(arguments: Vec<OsString>) {
     if let Err(e) = run_service(arguments) {
-        eventlog::error(eventlog::ID_OPEN_FAILED, &format!("service exited with error: {e}"));
+        eventlog::error(
+            eventlog::ID_OPEN_FAILED,
+            &format!("service exited with error: {e}"),
+        );
     }
 }
 
 fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
-    let ServiceArgs { lang, enable_overlap, quic, profile_dir } = parse_args(&arguments);
+    let ServiceArgs {
+        lang,
+        enable_overlap,
+        quic,
+        profile_dir,
+    } = parse_args(&arguments);
     crate::i18n::set(lang);
-    let _guard = crate::logging::init(crate::logging::LogSink::ServiceFile { dir: super::logs_dir() });
+    let _guard = crate::logging::init(crate::logging::LogSink::ServiceFile {
+        dir: super::logs_dir(),
+    });
 
     // Leave a breadcrumb in the Event Log before the process dies on a panic
     // (an unwind past the SCM FFI boundary aborts).
@@ -77,31 +87,48 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
             process_id: None,
         });
     };
-    set_state(ServiceState::StartPending, ServiceControlAccept::empty(), Duration::from_secs(10));
+    set_state(
+        ServiceState::StartPending,
+        ServiceControlAccept::empty(),
+        Duration::from_secs(10),
+    );
 
     let profile_dir = profile_dir.unwrap_or_else(super::profiles_dir);
     let _ = std::fs::create_dir_all(&profile_dir);
     let (human, key) = crate::netkey::compute();
 
-    let mut cfg = EvasionConfig { enable_overlap_disorder: enable_overlap, quic, ..Default::default() };
-    cfg.profile = Some(ProfilePaths { dir: profile_dir, net_key: key });
+    let mut cfg = EvasionConfig {
+        enable_overlap_disorder: enable_overlap,
+        quic,
+        ..Default::default()
+    };
+    cfg.profile = Some(ProfilePaths {
+        dir: profile_dir,
+        net_key: key,
+    });
 
     let filters = filter::build(&cfg).map_err(|e| anyhow::anyhow!("filter build: {e}"))?;
     compile_filter(&filters.main, Layer::Network)
         .map_err(|e| anyhow::anyhow!("filter rejected at pos {}: {}", e.pos, e.msg))?;
 
-    let handle = match WinDivertHandle::open(filters.main.as_c_str(), Layer::Network, 0, OpenFlags::new())
-    {
-        Ok(h) => Arc::new(h),
-        Err(e) => {
-            eventlog::error(
-                eventlog::ID_OPEN_FAILED,
-                &format!("WinDivertOpen failed: {e} — HVCI / Smart App Control? see the install notes"),
-            );
-            set_state(ServiceState::Stopped, ServiceControlAccept::empty(), Duration::default());
-            anyhow::bail!("WinDivertOpen: {e}");
-        }
-    };
+    let handle =
+        match WinDivertHandle::open(filters.main.as_c_str(), Layer::Network, 0, OpenFlags::new()) {
+            Ok(h) => Arc::new(h),
+            Err(e) => {
+                eventlog::error(
+                    eventlog::ID_OPEN_FAILED,
+                    &format!(
+                    "WinDivertOpen failed: {e} — HVCI / Smart App Control? see the install notes"
+                ),
+                );
+                set_state(
+                    ServiceState::Stopped,
+                    ServiceControlAccept::empty(),
+                    Duration::default(),
+                );
+                anyhow::bail!("WinDivertOpen: {e}");
+            }
+        };
     let _ = hslot.set(Arc::clone(&handle));
 
     // `--quic all` only. A failure here is not fatal: the TCP bypass is the
@@ -110,14 +137,20 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
     let _quic_block = match crate::engine_cmd::open_quic_block(&filters) {
         Ok(h) => h,
         Err(e) => {
-            eventlog::error(eventlog::ID_OPEN_FAILED, &format!("{e}; continuing without it"));
+            eventlog::error(
+                eventlog::ID_OPEN_FAILED,
+                &format!("{e}; continuing without it"),
+            );
             None
         }
     };
 
     let provider: NetKeyFn = Arc::new(crate::netkey::compute);
     let engine = Arc::new(Engine::with_live_netkey(cfg, provider));
-    eventlog::info(eventlog::ID_STARTED, &format!("service started — capture active (net {human})"));
+    eventlog::info(
+        eventlog::ID_STARTED,
+        &format!("service started — capture active (net {human})"),
+    );
 
     {
         let engine = Arc::clone(&engine);
@@ -142,18 +175,29 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
         Duration::default(),
     );
 
-    let mut src = WinDivertSource { h: Arc::clone(&handle) };
-    let mut sink = WinDivertSink { h: Arc::clone(&handle) };
+    let mut src = WinDivertSource {
+        h: Arc::clone(&handle),
+    };
+    let mut sink = WinDivertSink {
+        h: Arc::clone(&handle),
+    };
     let run = engine.run_main(&mut src, &mut sink, &stop);
 
     drop(_netwatch);
     engine.persist_now();
     if let Err(e) = run {
-        eventlog::warn(eventlog::ID_STOPPED, &format!("capture loop ended with: {e}"));
+        eventlog::warn(
+            eventlog::ID_STOPPED,
+            &format!("capture loop ended with: {e}"),
+        );
     }
 
     eventlog::info(eventlog::ID_STOPPED, "service stopped");
-    set_state(ServiceState::Stopped, ServiceControlAccept::empty(), Duration::default());
+    set_state(
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        Duration::default(),
+    );
     Ok(())
 }
 
@@ -166,7 +210,10 @@ pub struct ServiceArgs {
 }
 
 fn parse_args(args: &[OsString]) -> ServiceArgs {
-    let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let s: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     let lang = pos_value(&s, "--lang")
         .and_then(crate::i18n::parse)
         .unwrap_or(crate::i18n::Lang::En);
@@ -193,7 +240,10 @@ fn parse_args(args: &[OsString]) -> ServiceArgs {
 }
 
 fn pos_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 #[cfg(test)]
@@ -235,7 +285,10 @@ mod tests {
 
     #[test]
     fn parse_args_unknown_lang_falls_back_to_en() {
-        assert_eq!(parse_args(&argv(&["service", "run", "--lang", "xx"])).lang, Lang::En);
+        assert_eq!(
+            parse_args(&argv(&["service", "run", "--lang", "xx"])).lang,
+            Lang::En
+        );
     }
 
     #[test]

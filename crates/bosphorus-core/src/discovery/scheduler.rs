@@ -52,7 +52,11 @@ pub enum DiscoveryEvent {
     /// A candidate reached the promotion threshold. `via_seed` is set when the
     /// promoted candidate came from the seed list (and, for `DomainSibling` /
     /// `HouseStrategy`, was promoted on its first success).
-    Promoted { strategy: String, after: u8, via_seed: Option<SeedTier> },
+    Promoted {
+        strategy: String,
+        after: u8,
+        via_seed: Option<SeedTier>,
+    },
     /// The active strategy failed too many times; back to discovery.
     Demoted { strategy: String },
     /// Every grid candidate was tried and none worked.
@@ -103,12 +107,7 @@ fn pick_seed(
 
 impl Scheduler {
     /// Pick the next trial for `ts` with no seed list (the grid sweep only).
-    pub fn assign(
-        &self,
-        ts: &mut TargetState,
-        gen: &DefaultGenerator,
-        now: Instant,
-    ) -> Assignment {
+    pub fn assign(&self, ts: &mut TargetState, gen: &DefaultGenerator, now: Instant) -> Assignment {
         self.assign_seeded(ts, gen, &[], now)
     }
 
@@ -136,8 +135,11 @@ impl Scheduler {
                 // Active-passthrough), skip the naked Probe. Confirming "yes,
                 // blocked" with a bare ClientHello just costs one RST plus a
                 // client retry against a host that then rotates away.
-                let hi: Vec<(StrategyId, SeedTier)> =
-                    priority.iter().copied().filter(|(_, t)| t.is_high_confidence()).collect();
+                let hi: Vec<(StrategyId, SeedTier)> = priority
+                    .iter()
+                    .copied()
+                    .filter(|(_, t)| t.is_high_confidence())
+                    .collect();
                 let accept = accept_for(ts.server_initial_ttl);
                 match pick_seed(&hi, &ts.skip_ids(), gen, &accept) {
                     Some((sid, tier)) => {
@@ -264,10 +266,7 @@ impl Scheduler {
     ///
     /// Dormant within a single run: the generator is immutable, so this only
     /// ever fires once M8 reloads a persisted `TargetState` under a bigger grid.
-    fn revive_if_grid_grew(
-        ts: &mut TargetState,
-        gen: &DefaultGenerator,
-    ) -> Option<DiscoveryEvent> {
+    fn revive_if_grid_grew(ts: &mut TargetState, gen: &DefaultGenerator) -> Option<DiscoveryEvent> {
         if ts.phase != NetPhase::Exhausted {
             return None;
         }
@@ -278,8 +277,15 @@ impl Scheduler {
         ts.phase = NetPhase::Discover;
         ts.grid_size_at_exhaustion = None;
         ts.consecutive_failure = 0;
-        let untried = gen.all().iter().filter(|s| !ts.tried.contains(&s.id())).count();
-        Some(DiscoveryEvent::Revived { new_total: gen.len(), untried })
+        let untried = gen
+            .all()
+            .iter()
+            .filter(|s| !ts.tried.contains(&s.id()))
+            .count();
+        Some(DiscoveryEvent::Revived {
+            new_total: gen.len(),
+            untried,
+        })
     }
 
     /// Feed back a flow's verdict, with no timing information (synthetic
@@ -361,8 +367,11 @@ impl Scheduler {
                         // candidate's own successes count. Under the parallel
                         // sweep, another candidate succeeding once must not push
                         // this one over the line.
-                        let streak =
-                            ts.scores.get(&sid).map(|s| s.consecutive_success).unwrap_or(0);
+                        let streak = ts
+                            .scores
+                            .get(&sid)
+                            .map(|s| s.consecutive_success)
+                            .unwrap_or(0);
                         let via_seed = ts.seeded.get(&sid).copied();
                         let threshold = via_seed
                             .map(|t| t.promote_threshold(self.tuning.promote_after_success))
@@ -377,7 +386,11 @@ impl Scheduler {
                                 .map(|s| s.strategy.describe())
                                 .unwrap_or_default();
                             ts.compact(); // keep only the promoted strategy's score
-                            return DiscoveryEvent::Promoted { strategy, after: streak, via_seed };
+                            return DiscoveryEvent::Promoted {
+                                strategy,
+                                after: streak,
+                                via_seed,
+                            };
                         }
                     }
                     DiscoveryEvent::Noted
@@ -405,7 +418,10 @@ impl Scheduler {
                         ts.compact();
                         DiscoveryEvent::Exhausted { tried }
                     } else {
-                        DiscoveryEvent::NextCandidate { tried: ts.tried.len(), total: gen.len() }
+                        DiscoveryEvent::NextCandidate {
+                            tried: ts.tried.len(),
+                            total: gen.len(),
+                        }
                     }
                 }
             }
@@ -429,7 +445,9 @@ impl Scheduler {
                         ts.compact(); // active = None -> drops every stale score
                         DiscoveryEvent::Demoted { strategy }
                     } else {
-                        DiscoveryEvent::ActiveFailure { count: ts.consecutive_failure }
+                        DiscoveryEvent::ActiveFailure {
+                            count: ts.consecutive_failure,
+                        }
                     }
                 }
             }
@@ -449,7 +467,10 @@ mod tests {
     /// `n` candidates: `frag@<off>` for each offset, all wrong-seq.
     fn tiny_gen_n(offsets: &[u16]) -> DefaultGenerator {
         DefaultGenerator::with_axes(&GridAxes {
-            frag_anchor: offsets.iter().map(|o| Some(SplitAnchor::AbsoluteOffset(*o))).collect(),
+            frag_anchor: offsets
+                .iter()
+                .map(|o| Some(SplitAnchor::AbsoluteOffset(*o)))
+                .collect(),
             frag_reverse: vec![false],
             desync: vec![DesyncKind::WrongSeq],
             repeats: vec![1],
@@ -470,7 +491,9 @@ mod tests {
     }
 
     fn sched() -> Scheduler {
-        Scheduler { tuning: EvasionConfig::default().discovery }
+        Scheduler {
+            tuning: EvasionConfig::default().discovery,
+        }
     }
 
     fn now() -> Instant {
@@ -516,7 +539,10 @@ mod tests {
 
         // Probe fails -> Blocked / Discover.
         s.assign(&mut ts, &g, now());
-        assert_eq!(s.record(&mut ts, &g, None, FlowOutcome::DpiReset, now()), DiscoveryEvent::Blocked);
+        assert_eq!(
+            s.record(&mut ts, &g, None, FlowOutcome::DpiReset, now()),
+            DiscoveryEvent::Blocked
+        );
         assert_eq!(ts.phase, NetPhase::Discover);
 
         // candidate 0 fails -> NextCandidate.
@@ -532,7 +558,10 @@ mod tests {
         let a1 = s.assign(&mut ts, &g, now());
         let id1 = a1.id.unwrap();
         assert_ne!(id0, id1);
-        assert_eq!(s.record(&mut ts, &g, Some(id1), FlowOutcome::Success, now()), DiscoveryEvent::Noted);
+        assert_eq!(
+            s.record(&mut ts, &g, Some(id1), FlowOutcome::Success, now()),
+            DiscoveryEvent::Noted
+        );
         let ev = s.record(&mut ts, &g, Some(id1), FlowOutcome::Success, now());
         assert!(matches!(ev, DiscoveryEvent::Promoted { .. }));
         assert_eq!(ts.phase, NetPhase::Active);
@@ -591,7 +620,11 @@ mod tests {
 
         let a = s.assign(&mut ts, &g, t0);
         let b = s.assign(&mut ts, &g, t0);
-        assert_ne!(a.id.unwrap(), b.id.unwrap(), "two unresolved trials explore different candidates");
+        assert_ne!(
+            a.id.unwrap(),
+            b.id.unwrap(),
+            "two unresolved trials explore different candidates"
+        );
         assert_eq!(ts.in_flight.len(), 2);
     }
 
@@ -647,7 +680,11 @@ mod tests {
         let c = s.assign(&mut ts, &g, t0);
         assert!(c.id.is_none() && c.strategy.is_none() && c.kind == TrialKind::Control);
         assert!(c.event.is_none());
-        assert_eq!(ts.phase, NetPhase::Discover, "not exhausted — the rest are just in flight");
+        assert_eq!(
+            ts.phase,
+            NetPhase::Discover,
+            "not exhausted — the rest are just in flight"
+        );
     }
 
     // --- M7d: grid-growth revival ---
@@ -670,10 +707,16 @@ mod tests {
         assert_eq!(ts.tried.len(), 2, "tried is NOT cleared");
         assert!(matches!(
             a.event,
-            Some(DiscoveryEvent::Revived { new_total: 3, untried: 1 })
+            Some(DiscoveryEvent::Revived {
+                new_total: 3,
+                untried: 1
+            })
         ));
         let fresh = a.id.expect("a candidate was handed out");
-        assert!(!ts.tried.contains(&fresh), "only a not-yet-tried candidate is picked");
+        assert!(
+            !ts.tried.contains(&fresh),
+            "only a not-yet-tried candidate is picked"
+        );
     }
 
     #[test]
@@ -685,8 +728,15 @@ mod tests {
 
         exhaust(&s, &mut ts, &g, t0);
         assert_eq!(ts.phase, NetPhase::Exhausted);
-        assert!(ts.scores.is_empty(), "exhausted target keeps no per-candidate scores");
-        assert_eq!(ts.scores.capacity(), 0, "and the map allocation is released");
+        assert!(
+            ts.scores.is_empty(),
+            "exhausted target keeps no per-candidate scores"
+        );
+        assert_eq!(
+            ts.scores.capacity(),
+            0,
+            "and the map allocation is released"
+        );
         // `tried` ids are still there (they drive grid-growth revival).
         assert_eq!(ts.tried.len(), 4);
         assert!(ts.best().is_none());
@@ -710,7 +760,11 @@ mod tests {
 
         assert!(matches!(ev, DiscoveryEvent::Promoted { .. }));
         assert_eq!(ts.phase, NetPhase::Active);
-        assert_eq!(ts.scores.len(), 1, "only the promoted strategy's score survives");
+        assert_eq!(
+            ts.scores.len(),
+            1,
+            "only the promoted strategy's score survives"
+        );
         assert!(ts.scores.contains_key(&a1.id.unwrap()));
         // The promoted strategy is still resolvable for the Exploit assignment.
         let a = s.assign(&mut ts, &g, t0);
@@ -736,7 +790,10 @@ mod tests {
             s.record(&mut ts, &g, a.id, FlowOutcome::DpiReset, t0);
         }
         assert_eq!(ts.phase, NetPhase::Discover, "demoted");
-        assert!(ts.scores.is_empty(), "demote wipes the score map for a fresh sweep");
+        assert!(
+            ts.scores.is_empty(),
+            "demote wipes the score map for a fresh sweep"
+        );
         assert!(ts.tried.is_empty());
     }
 
@@ -773,15 +830,28 @@ mod tests {
         assert_eq!(a.id, Some(seed));
         assert_eq!(a.kind, TrialKind::Explore);
         assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
-        assert!(matches!(a.event, Some(DiscoveryEvent::ProbeSkipped { via: SeedTier::DomainSibling })));
-        assert_eq!(ts.phase, NetPhase::Discover, "went straight to Discover, no naked Probe");
+        assert!(matches!(
+            a.event,
+            Some(DiscoveryEvent::ProbeSkipped {
+                via: SeedTier::DomainSibling
+            })
+        ));
+        assert_eq!(
+            ts.phase,
+            NetPhase::Discover,
+            "went straight to Discover, no naked Probe"
+        );
         assert_eq!(ts.seeded.get(&seed).copied(), Some(SeedTier::DomainSibling));
 
         // First success => Promoted via the seed (threshold 1), not after 2.
         let ev = s.record(&mut ts, &g, Some(seed), FlowOutcome::Success, t);
         assert!(matches!(
             ev,
-            DiscoveryEvent::Promoted { after: 1, via_seed: Some(SeedTier::DomainSibling), .. }
+            DiscoveryEvent::Promoted {
+                after: 1,
+                via_seed: Some(SeedTier::DomainSibling),
+                ..
+            }
         ));
         assert_eq!(ts.phase, NetPhase::Active);
         assert_eq!(ts.active, Some(seed));
@@ -794,7 +864,12 @@ mod tests {
         let t = now();
         let mut ts = TargetState::new("t".into(), t);
         let a = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::HouseStrategy)], t);
-        assert!(matches!(a.event, Some(DiscoveryEvent::ProbeSkipped { via: SeedTier::HouseStrategy })));
+        assert!(matches!(
+            a.event,
+            Some(DiscoveryEvent::ProbeSkipped {
+                via: SeedTier::HouseStrategy
+            })
+        ));
         assert_eq!(ts.phase, NetPhase::Discover);
     }
 
@@ -812,7 +887,11 @@ mod tests {
         assert!(a.id.is_none() && a.event.is_none() && a.seed_tier.is_none());
         assert_eq!(a.kind, TrialKind::Control);
         assert_eq!(a.id, b.id);
-        assert_eq!(a_ts.phase, NetPhase::Probe, "no seed => still a naked Probe");
+        assert_eq!(
+            a_ts.phase,
+            NetPhase::Probe,
+            "no seed => still a naked Probe"
+        );
         assert_eq!(a_ts.phase, b_ts.phase);
     }
 
@@ -834,7 +913,10 @@ mod tests {
         let t = now();
         let mut ts = TargetState::new("t".into(), t);
         let a = s.assign_seeded(&mut ts, &g, &[(id0(&g), SeedTier::IspPool)], t);
-        assert!(a.id.is_none() && a.event.is_none(), "cross-network prior earns its Probe");
+        assert!(
+            a.id.is_none() && a.event.is_none(),
+            "cross-network prior earns its Probe"
+        );
         assert_eq!(ts.phase, NetPhase::Probe);
         // In Discover it IS offered, at the default threshold.
         ts.phase = NetPhase::Discover;
@@ -905,7 +987,10 @@ mod tests {
         assert_eq!(ts.in_flight.len(), 2);
 
         // A succeeds once — one ServerHello, below the threshold.
-        assert_eq!(s.record(&mut ts, &g, Some(a), FlowOutcome::Success, t), DiscoveryEvent::Noted);
+        assert_eq!(
+            s.record(&mut ts, &g, Some(a), FlowOutcome::Success, t),
+            DiscoveryEvent::Noted
+        );
         assert_eq!(ts.phase, NetPhase::Discover);
 
         // B succeeds once. It has a SINGLE ServerHello, so it must NOT promote.
@@ -921,7 +1006,14 @@ mod tests {
         // A's OWN second success crosses A's own threshold -> A is promoted.
         let ev = s.record(&mut ts, &g, Some(a), FlowOutcome::Success, t);
         assert!(
-            matches!(ev, DiscoveryEvent::Promoted { after: 2, via_seed: None, .. }),
+            matches!(
+                ev,
+                DiscoveryEvent::Promoted {
+                    after: 2,
+                    via_seed: None,
+                    ..
+                }
+            ),
             "got {ev:?}"
         );
         assert_eq!(ts.phase, NetPhase::Active);
@@ -956,7 +1048,11 @@ mod tests {
         assert!(
             matches!(
                 ev,
-                DiscoveryEvent::Promoted { after: 1, via_seed: Some(SeedTier::HouseStrategy), .. }
+                DiscoveryEvent::Promoted {
+                    after: 1,
+                    via_seed: Some(SeedTier::HouseStrategy),
+                    ..
+                }
             ),
             "got {ev:?}"
         );
@@ -981,8 +1077,15 @@ mod tests {
             s.record(&mut ts, &g, Some(id), FlowOutcome::Blackhole, t),
             DiscoveryEvent::NextCandidate { .. }
         ));
-        assert!(!ts.tried.contains(&id), "one Blackhole does not rule the candidate out");
-        assert_eq!(s.assign(&mut ts, &g, t).id, Some(id), "the sweep re-offers it");
+        assert!(
+            !ts.tried.contains(&id),
+            "one Blackhole does not rule the candidate out"
+        );
+        assert_eq!(
+            s.assign(&mut ts, &g, t).id,
+            Some(id),
+            "the sweep re-offers it"
+        );
 
         // Second Blackhole: now parked.
         s.record(&mut ts, &g, Some(id), FlowOutcome::Blackhole, t);
@@ -1035,6 +1138,10 @@ mod tests {
         // sweep must terminate rather than loop on it forever.
         let ev = s.record(&mut ts, &g, Some(ids[0]), FlowOutcome::Blackhole, t);
         assert!(matches!(ev, DiscoveryEvent::Exhausted { .. }), "got {ev:?}");
-        assert_eq!(ts.phase, NetPhase::Exhausted, "trial budget spent -> Exhausted");
+        assert_eq!(
+            ts.phase,
+            NetPhase::Exhausted,
+            "trial budget spent -> Exhausted"
+        );
     }
 }

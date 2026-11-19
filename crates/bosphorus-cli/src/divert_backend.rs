@@ -5,7 +5,9 @@ use std::sync::Arc;
 use bosphorus_core::{
     CaptureMeta, Captured, ChecksumWhich, CoreError, PacketSink, PacketSource, RawAddr, SendBatch,
 };
-use bosphorus_divert::{calc_checksums, Address, ChecksumFlags, DivertError, WinDivertHandle, ADDRESS_SIZE};
+use bosphorus_divert::{
+    calc_checksums, Address, ChecksumFlags, DivertError, WinDivertHandle, ADDRESS_SIZE,
+};
 
 // `RawAddr`'s inner array must match the WinDivert address size exactly.
 const _: () = assert!(ADDRESS_SIZE == 80);
@@ -89,7 +91,8 @@ impl PacketSink for WinDivertSink {
             ChecksumWhich::Ip => ChecksumFlags::new().set_no_tcp().set_no_udp(),
             ChecksumWhich::L4 => ChecksumFlags::new().set_no_ip(),
         };
-        calc_checksums(packet, Some(&mut addr), flags).map_err(|e| CoreError::Sink(e.to_string()))?;
+        calc_checksums(packet, Some(&mut addr), flags)
+            .map_err(|e| CoreError::Sink(e.to_string()))?;
 
         meta.raw = RawAddr(addr.to_bytes());
         meta.ip_checksum_valid = addr.ip_checksum_valid();

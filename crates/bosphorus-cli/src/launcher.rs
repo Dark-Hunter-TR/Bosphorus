@@ -29,8 +29,8 @@ use windows::Win32::System::Console::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MESSAGEBOX_STYLE, SW_HIDE,
-    SW_SHOWNORMAL,
+    MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MESSAGEBOX_STYLE,
+    SW_HIDE, SW_SHOWNORMAL,
 };
 
 use crate::i18n::{self, Msg};
@@ -134,7 +134,10 @@ pub struct MenuModel {
 
 impl MenuModel {
     pub fn new(installed: bool) -> Self {
-        Self { items: Self::items_for(installed), cursor: 0 }
+        Self {
+            items: Self::items_for(installed),
+            cursor: 0,
+        }
     }
 
     pub fn items_for(installed: bool) -> Vec<MenuItem> {
@@ -466,9 +469,12 @@ fn profiles_dir() -> std::path::PathBuf {
 /// Newest `*.json` under `profiles/`, with a crude target / active count.
 fn profile_info() {
     let dir = profiles_dir();
-    let newest = std::fs::read_dir(&dir).ok().into_iter().flatten().flatten().filter(|e| {
-        e.path().extension().and_then(|x| x.to_str()) == Some("json")
-    });
+    let newest = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"));
     let newest = newest.max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
     match newest {
         None => {
@@ -499,7 +505,10 @@ fn profile_info() {
 
 fn print_about() {
     println!("\n  Bosphorus — self-learning DPI bypass");
-    println!("  WinDivert 2.2   service name: {}", crate::service::SERVICE_NAME);
+    println!(
+        "  WinDivert 2.2   service name: {}",
+        crate::service::SERVICE_NAME
+    );
     println!("  data:     {}", current_data_dir().display());
     println!("  profiles: {}", profiles_dir().display());
     println!("  logs:     {}", crate::service::logs_dir().display());
@@ -548,7 +557,10 @@ fn frame(model: &MenuModel, lang: i18n::Lang, installed: bool) -> String {
             s.push_str(&format!("    {label}\r\n"));
         }
     }
-    s.push_str(&format!("\r\n  \x1b[2m{}\x1b[0m\r\n", i18n::t(Msg::TuiHelp)));
+    s.push_str(&format!(
+        "\r\n  \x1b[2m{}\x1b[0m\r\n",
+        i18n::t(Msg::TuiHelp)
+    ));
     s
 }
 
@@ -625,15 +637,20 @@ impl TermGuard {
                 anyhow::bail!("virtual-terminal output unsupported");
             }
             let raw_in = CONSOLE_MODE(
-                in_mode.0
-                    & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0 | ENABLE_PROCESSED_INPUT.0),
+                in_mode.0 & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0 | ENABLE_PROCESSED_INPUT.0),
             );
             let _ = SetConsoleMode(inp, raw_in);
             let _ = SetConsoleOutputCP(65001); // UTF-8: arrows + Turkish glyphs
 
             print!("\x1b[?1049h\x1b[?25l"); // alt screen, hide cursor
             let _ = std::io::stdout().flush();
-            Ok(Self { out, inp, out_mode, in_mode, out_cp })
+            Ok(Self {
+                out,
+                inp,
+                out_mode,
+                in_mode,
+                out_cp,
+            })
         }
     }
 
@@ -782,7 +799,12 @@ fn message_box(body: &str, style: MESSAGEBOX_STYLE) {
     let body_w = wide(body);
     // SAFETY: null owner HWND is allowed; both wide strings are NUL-terminated.
     unsafe {
-        MessageBoxW(HWND::default(), PCWSTR(body_w.as_ptr()), w!("Bosphorus"), MB_OK | style);
+        MessageBoxW(
+            HWND::default(),
+            PCWSTR(body_w.as_ptr()),
+            w!("Bosphorus"),
+            MB_OK | style,
+        );
     }
 }
 fn info_box(body: &str) {
@@ -878,7 +900,10 @@ mod tests {
         use LauncherChoice as C;
         use ResolvedAction as R;
         // 4b: install decision, now at the (choice, elevated) seam
-        assert_eq!(dispatch_choice(C::InstallService, false), R::ElevateAndInstall);
+        assert_eq!(
+            dispatch_choice(C::InstallService, false),
+            R::ElevateAndInstall
+        );
         assert_eq!(dispatch_choice(C::InstallService, true), R::InstallHere);
         // new two-way elevation: run once + self-test behave like install
         assert_eq!(dispatch_choice(C::RunOnce, false), R::ElevateAndRun);
@@ -886,7 +911,10 @@ mod tests {
         assert_eq!(dispatch_choice(C::SelfTest, false), R::ElevateAndSelfTest);
         assert_eq!(dispatch_choice(C::SelfTest, true), R::RunSelfTestHere);
         // uninstall
-        assert_eq!(dispatch_choice(C::UninstallService, false), R::ElevateAndUninstall);
+        assert_eq!(
+            dispatch_choice(C::UninstallService, false),
+            R::ElevateAndUninstall
+        );
         assert_eq!(dispatch_choice(C::UninstallService, true), R::UninstallHere);
         // quit is quit (status / check-filters / profile / about run inline, never here)
         assert_eq!(dispatch_choice(C::Quit, false), R::Exit);
@@ -903,8 +931,14 @@ mod tests {
             as_strs(&elevated_uninstall_args(Lang::Tr)),
             ["service", "uninstall", "--lang", "tr", "--from-launcher"]
         );
-        assert_eq!(as_strs(&elevated_run_args(Lang::En)), ["--engine", "--lang", "en"]);
-        assert_eq!(as_strs(&elevated_selftest_args(Lang::En)), ["--selftest", "--lang", "en"]);
+        assert_eq!(
+            as_strs(&elevated_run_args(Lang::En)),
+            ["--engine", "--lang", "en"]
+        );
+        assert_eq!(
+            as_strs(&elevated_selftest_args(Lang::En)),
+            ["--selftest", "--lang", "en"]
+        );
         assert_eq!(elevated_run_args(Lang::Tr)[2], "tr");
     }
 }

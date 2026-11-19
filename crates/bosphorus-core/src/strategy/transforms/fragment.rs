@@ -47,7 +47,9 @@ pub fn native_multi_fragment(
 ) -> Result<Vec<Vec<u8>>, CoreError> {
     let payload = orig.payload();
     let cuts = resolve_cuts(spec, payload)?;
-    let seq = orig.tcp_seq().ok_or(CoreError::Parse("fragment: not a TCP packet"))?;
+    let seq = orig
+        .tcp_seq()
+        .ok_or(CoreError::Parse("fragment: not a TCP packet"))?;
 
     let mut segs = Vec::with_capacity(cuts.len() + 1);
     let mut lo = 0usize;
@@ -65,7 +67,6 @@ pub fn native_multi_fragment(
     }
     Ok(segs)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -108,7 +109,9 @@ mod tests {
         tls.extend_from_slice(&hs);
 
         // wrap in IPv4 + TCP
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&1000u32.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
@@ -154,12 +157,22 @@ mod tests {
         let sni = find_sni(v.payload()).unwrap();
 
         let (s0, _) = two(SplitAnchor::SniStart, &v);
-        assert_eq!(PacketView::parse(&s0).unwrap().payload().len(), sni.host.start);
+        assert_eq!(
+            PacketView::parse(&s0).unwrap().payload().len(),
+            sni.host.start
+        );
 
         let (s0, s1) = two(SplitAnchor::SniMiddle, &v);
         let split = PacketView::parse(&s0).unwrap().payload().len();
         assert!(split > sni.host.start && split < sni.host.end);
-        assert_eq!([PacketView::parse(&s0).unwrap().payload(), PacketView::parse(&s1).unwrap().payload()].concat(), v.payload());
+        assert_eq!(
+            [
+                PacketView::parse(&s0).unwrap().payload(),
+                PacketView::parse(&s1).unwrap().payload()
+            ]
+            .concat(),
+            v.payload()
+        );
     }
 
     // --- M7b: multi-part native fragment ---
@@ -173,7 +186,10 @@ mod tests {
         let pkt = ch_with_sni();
         let v = PacketView::parse(&pkt).unwrap();
         let seq = v.tcp_seq().unwrap();
-        let spec = FragmentSpec { anchors: vec![ao(2), ao(6)], reverse: false };
+        let spec = FragmentSpec {
+            anchors: vec![ao(2), ao(6)],
+            reverse: false,
+        };
 
         let segs = native_multi_fragment(&spec, &v).unwrap();
         assert_eq!(segs.len(), 3);
@@ -188,7 +204,11 @@ mod tests {
         assert_eq!(p[1].tcp_seq(), Some(seq + 2));
         assert_eq!(p[2].tcp_seq(), Some(seq + 6));
         for s in &segs {
-            assert_eq!(u16::from_be_bytes([s[2], s[3]]), s.len() as u16, "ip len fixed");
+            assert_eq!(
+                u16::from_be_bytes([s[2], s[3]]),
+                s.len() as u16,
+                "ip len fixed"
+            );
         }
     }
 
@@ -196,8 +216,14 @@ mod tests {
     fn multi_fragment_sorts_and_dedups_anchors() {
         let pkt = ch_with_sni();
         let v = PacketView::parse(&pkt).unwrap();
-        let unordered = FragmentSpec { anchors: vec![ao(6), ao(2), ao(6)], reverse: false };
-        let canonical = FragmentSpec { anchors: vec![ao(2), ao(6)], reverse: false };
+        let unordered = FragmentSpec {
+            anchors: vec![ao(6), ao(2), ao(6)],
+            reverse: false,
+        };
+        let canonical = FragmentSpec {
+            anchors: vec![ao(2), ao(6)],
+            reverse: false,
+        };
         assert_eq!(
             native_multi_fragment(&unordered, &v).unwrap(),
             native_multi_fragment(&canonical, &v).unwrap()
@@ -215,7 +241,10 @@ mod tests {
         };
         let segs = native_multi_fragment(&spec, &v).unwrap();
         assert_eq!(segs.len(), 3);
-        assert_eq!(PacketView::parse(&segs[0]).unwrap().payload(), &v.payload()[..5]);
+        assert_eq!(
+            PacketView::parse(&segs[0]).unwrap().payload(),
+            &v.payload()[..5]
+        );
         assert_eq!(
             PacketView::parse(&segs[1]).unwrap().payload(),
             &v.payload()[5..sni.host.start]
@@ -231,19 +260,39 @@ mod tests {
         let pkt = ch_with_sni();
         let v = PacketView::parse(&pkt).unwrap();
         let plen = v.payload().len() as u16;
-        assert!(native_multi_fragment(&FragmentSpec { anchors: vec![ao(0), ao(4)], reverse: false }, &v).is_err());
-        assert!(native_multi_fragment(&FragmentSpec { anchors: vec![ao(4), ao(plen)], reverse: false }, &v).is_err());
+        assert!(native_multi_fragment(
+            &FragmentSpec {
+                anchors: vec![ao(0), ao(4)],
+                reverse: false
+            },
+            &v
+        )
+        .is_err());
+        assert!(native_multi_fragment(
+            &FragmentSpec {
+                anchors: vec![ao(4), ao(plen)],
+                reverse: false
+            },
+            &v
+        )
+        .is_err());
     }
 
     #[test]
     fn no_sni_errors_not_panics() {
         // A packet whose payload is not a ClientHello.
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
-        p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
+        p.extend_from_slice(&[
+            0x30, 0x39, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0,
+        ]);
         p.extend_from_slice(b"not tls");
         let total = p.len() as u16;
         p[2..4].copy_from_slice(&total.to_be_bytes());
         let v = PacketView::parse(&p).unwrap();
-        assert!(native_multi_fragment(&FragmentSpec::one(SplitAnchor::SniStart, false), &v).is_err());
+        assert!(
+            native_multi_fragment(&FragmentSpec::one(SplitAnchor::SniStart, false), &v).is_err()
+        );
     }
 }

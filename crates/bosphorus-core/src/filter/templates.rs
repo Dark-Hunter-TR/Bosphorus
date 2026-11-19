@@ -44,4 +44,5 @@ pub const MAXPAYLOAD_FMT: &str = "and (tcp.PayloadLength ? tcp.PayloadLength < {
 
 /// `add_filter_str` UDP form (goodbyedpi.c:203-204) with port 53 substituted
 /// for `%d`, and the leading `" or "` dropped (the builder adds it).
-pub const DNS_CLAUSE_PORT53: &str = "(udp and !impostor and !loopback and (udp.SrcPort == 53 or udp.DstPort == 53))";
+pub const DNS_CLAUSE_PORT53: &str =
+    "(udp and !impostor and !loopback and (udp.SrcPort == 53 or udp.DstPort == 53))";

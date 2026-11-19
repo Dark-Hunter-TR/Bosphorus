@@ -23,7 +23,11 @@ impl PacketBuilder {
         Self {
             buf: v.raw().to_vec(),
             ipv6: v.is_ipv6(),
-            ip_hdr_len: if v.is_ipv6() { 40 } else { (v.raw()[0] & 0x0f) as usize * 4 },
+            ip_hdr_len: if v.is_ipv6() {
+                40
+            } else {
+                (v.raw()[0] & 0x0f) as usize * 4
+            },
             l4_hdr_start: l4.start,
             is_tcp: v.is_tcp(),
             payload_start: v.payload_offset(),
@@ -162,7 +166,9 @@ mod tests {
         let s0 = s0.into_bytes();
 
         let mut s1 = PacketBuilder::from_view(&v);
-        s1.slice_payload_from(2).set_tcp_seq(seq.wrapping_add(2)).unwrap();
+        s1.slice_payload_from(2)
+            .set_tcp_seq(seq.wrapping_add(2))
+            .unwrap();
         let s1 = s1.into_bytes();
 
         let p0 = PacketView::parse(&s0).unwrap();
