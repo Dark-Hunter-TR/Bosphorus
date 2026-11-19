@@ -45,13 +45,18 @@ fn the_selective_quic_clause_is_present_and_version_agnostic() {
 }
 
 #[test]
-fn dns_enabled_filter_compiles() {
+fn dns_upstream_is_rejected() {
     let cfg = EvasionConfig {
         dns_upstream: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
         ..Default::default()
     };
-    let f = filter::build(&cfg).expect("build");
-    compile_filter(&f.main, Layer::Network).expect("dns-enabled main filter accepted");
+    let err = match filter::build(&cfg) {
+        Ok(_) => panic!("dns_upstream must be rejected"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("dns_upstream"), "msg: {msg}");
+    assert!(msg.contains("not supported"), "msg: {msg}");
 }
 
 #[test]

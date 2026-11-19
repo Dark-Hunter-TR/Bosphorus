@@ -27,6 +27,12 @@ fn port_clause(ports: &[u16], field: &str) -> String {
 /// Build the filter strings from config. String assembly only — call
 /// `bosphorus_divert::compile_filter` to check them against WinDivert.
 pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
+    if cfg.dns_upstream.is_some() {
+        return Err(CoreError::Config(
+            "dns_upstream is not supported: UDP/53 redirect is not implemented; remove dns_upstream"
+                .into(),
+        ));
+    }
     let maxpayload = t::MAXPAYLOAD_FMT.replace("{n}", &cfg.max_payload_filter.to_string());
     let ports = cfg.effective_tls_ports();
 
@@ -64,11 +70,6 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
                 .replace("{v4dst}", t::NO_LOCALNETS_V4_DST)
                 .replace("{v6dst}", t::NO_LOCALNETS_V6_DST),
         );
-    }
-    if cfg.dns_upstream.is_some() {
-        // GoodbyeDPI appends the UDP clause after the whole `(tcp ...)` group.
-        main.push_str(" or ");
-        main.push_str(t::DNS_CLAUSE_PORT53);
     }
 
     let main = CString::new(main).map_err(|_| CoreError::Filter("main filter has interior NUL".into()))?;
@@ -140,14 +141,20 @@ mod tests {
     }
 
     #[test]
-    fn dns_clause_added_only_with_upstream() {
+    fn dns_upstream_is_rejected() {
         let cfg = EvasionConfig {
             dns_upstream: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
             ..Default::default()
         };
-        let s = build(&cfg).unwrap().main.into_string().unwrap();
-        assert!(s.ends_with(t::DNS_CLAUSE_PORT53));
-        assert_eq!(count(&s, '('), count(&s, ')'));
+        let err = match build(&cfg) {
+            Ok(_) => panic!("dns_upstream must be rejected"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, CoreError::Config(_)), "err: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("dns_upstream"), "msg: {msg}");
+        assert!(msg.contains("not supported"), "msg: {msg}");
+        assert!(msg.contains("UDP/53 redirect is not implemented"), "msg: {msg}");
     }
 
 
