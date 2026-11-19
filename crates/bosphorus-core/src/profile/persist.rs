@@ -139,6 +139,17 @@ pub fn load(dir: &Path, net_key: &str) -> Option<ProfileFile> {
     }
 }
 
+/// Read only the exact `<dir>/<net_key>.json`, without NetKey-drift adoption.
+/// Live rebinds use this: switching networks must never import another
+/// network's learned targets into the new session.
+pub fn load_exact(dir: &Path, net_key: &str) -> Option<ProfileFile> {
+    let bytes = std::fs::read(profile_path(dir, net_key)).ok()?;
+    match serde_json::from_slice::<ProfileFile>(&bytes) {
+        Ok(f) if f.version == PROFILE_VERSION => Some(f),
+        _ => None,
+    }
+}
+
 fn adopt_latest(dir: &Path, net_key: &str) -> Option<ProfileFile> {
     let target = profile_path(dir, net_key);
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
