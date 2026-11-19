@@ -85,7 +85,11 @@ pub struct IspPool {
 
 impl IspPool {
     pub fn new(isp: &str) -> Self {
-        Self { version: ISP_POOL_VERSION, isp: isp.to_owned(), entries: Vec::new() }
+        Self {
+            version: ISP_POOL_VERSION,
+            isp: isp.to_owned(),
+            entries: Vec::new(),
+        }
     }
 
     /// `<dir>/isp/<sanitized-isp>.json`.
@@ -128,9 +132,9 @@ impl IspPool {
         let mut by_id: HashMap<StrategyId, (Strategy, u64, u64, u32, StrategyQuality)> =
             HashMap::new();
         for (id, sc) in promoted {
-            let e = by_id.entry(*id).or_insert_with(|| {
-                (sc.strategy.clone(), 0, 0, 0, StrategyQuality::default())
-            });
+            let e = by_id
+                .entry(*id)
+                .or_insert_with(|| (sc.strategy.clone(), 0, 0, 0, StrategyQuality::default()));
             e.1 += sc.trials as u64;
             e.2 += sc.successes as u64;
             e.3 += 1;
@@ -149,7 +153,10 @@ impl IspPool {
             let entry = match self.entries.iter_mut().find(|e| e.strategy.id() == id) {
                 Some(e) => e,
                 None => {
-                    self.entries.push(IspPoolEntry { strategy, contributions: Vec::new() });
+                    self.entries.push(IspPoolEntry {
+                        strategy,
+                        contributions: Vec::new(),
+                    });
                     self.entries.last_mut().unwrap()
                 }
             };
@@ -157,7 +164,9 @@ impl IspPool {
             entry.contributions.retain(|c| c.net_key != net_key);
             entry.contributions.push(contrib);
             if entry.contributions.len() > MAX_CONTRIBUTIONS {
-                entry.contributions.sort_by_key(|c| std::cmp::Reverse(c.last_seen));
+                entry
+                    .contributions
+                    .sort_by_key(|c| std::cmp::Reverse(c.last_seen));
                 entry.contributions.truncate(MAX_CONTRIBUTIONS);
             }
         }
@@ -187,15 +196,18 @@ impl IspPool {
                     (None, None) => std::cmp::Ordering::Equal,
                 })
         });
-        ranked.into_iter().map(|(e, ..)| (e.strategy.id(), SeedTier::IspPool)).collect()
+        ranked
+            .into_iter()
+            .map(|(e, ..)| (e.strategy.id(), SeedTier::IspPool))
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::DefaultGenerator;
     use crate::config::EvasionConfig;
+    use crate::strategy::DefaultGenerator;
 
     fn gen() -> DefaultGenerator {
         DefaultGenerator::new(&EvasionConfig::default())
@@ -215,7 +227,11 @@ mod tests {
         pool.merge_session("netA", &[(s0.id(), score(s0.clone(), 3, 2))], 100);
         pool.merge_session("netA", &[(s0.id(), score(s0.clone(), 9, 8))], 200);
         assert_eq!(pool.entries.len(), 1);
-        assert_eq!(pool.entries[0].contributions.len(), 1, "same network -> one contribution");
+        assert_eq!(
+            pool.entries[0].contributions.len(),
+            1,
+            "same network -> one contribution"
+        );
         // The later run's counts replaced the earlier ones.
         let (t, s, _) = pool.entries[0].totals();
         assert_eq!((t, s), (9, 8));
@@ -268,7 +284,12 @@ mod tests {
             pool.merge_session(&format!("net{i}"), &[(a.id(), score(a.clone(), 2, 2))], i);
         }
         assert_eq!(pool.entries[0].contributions.len(), MAX_CONTRIBUTIONS);
-        let oldest = pool.entries[0].contributions.iter().map(|c| c.last_seen).min().unwrap();
+        let oldest = pool.entries[0]
+            .contributions
+            .iter()
+            .map(|c| c.last_seen)
+            .min()
+            .unwrap();
         assert_eq!(oldest, 5, "the 5 oldest contributions were dropped");
     }
 
@@ -289,7 +310,7 @@ mod tests {
         let tmps: Vec<_> = std::fs::read_dir(&isp_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("tmp")))
             .collect();
         assert!(tmps.is_empty(), "left a temp file: {tmps:?}");
     }
@@ -305,7 +326,14 @@ mod tests {
 
     #[test]
     fn isp_pool_tier_is_weak_default_threshold_and_never_skips_the_probe() {
-        assert_eq!(SeedTier::IspPool.promote_threshold(2), 2, "no 1-success shortcut");
-        assert!(!SeedTier::IspPool.is_high_confidence(), "must not trigger Probe-skip");
+        assert_eq!(
+            SeedTier::IspPool.promote_threshold(2),
+            2,
+            "no 1-success shortcut"
+        );
+        assert!(
+            !SeedTier::IspPool.is_high_confidence(),
+            "must not trigger Probe-skip"
+        );
     }
 }
