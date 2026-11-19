@@ -16,7 +16,9 @@ pub enum LogSink {
     /// Interactive console (used once `run_engine` is switched over in 4c).
     #[allow(dead_code)]
     Console,
-    ServiceFile { dir: PathBuf },
+    ServiceFile {
+        dir: PathBuf,
+    },
 }
 
 /// Install the global subscriber. For the service, returns a guard that must be
@@ -24,16 +26,25 @@ pub enum LogSink {
 pub fn init(sink: LogSink) -> Option<WorkerGuard> {
     match sink {
         LogSink::Console => {
-            let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-            let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(true)
+                .try_init();
             None
         }
         LogSink::ServiceFile { dir } => {
             let _ = std::fs::create_dir_all(&dir);
+            // G14/B5: service logs may contain sensitive target/SNI metadata;
+            // harden the default %ProgramData% log dir before writing.
+            crate::service::security::harden_default_service_dir(&dir);
             prune_old_logs(&dir, 14);
 
-            let (writer, guard) =
-                tracing_appender::non_blocking(tracing_appender::rolling::daily(&dir, "bosphorus.log"));
+            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
+                &dir,
+                "bosphorus.log",
+            ));
             let filter = EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("bosphorus=info,warn"));
             let file_layer = tracing_subscriber::fmt::layer()
@@ -52,14 +63,20 @@ pub fn init(sink: LogSink) -> Option<WorkerGuard> {
 }
 
 fn prune_old_logs(dir: &Path, keep_days: u64) {
-    let Some(cutoff) =
-        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(keep_days * 86_400))
+    let Some(cutoff) = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(keep_days * 86_400))
     else {
         return;
     };
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with("bosphorus.log") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("bosphorus.log")
+        {
             continue;
         }
         if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
@@ -95,7 +112,11 @@ impl<S: Subscriber> Layer<S> for EventLogLayer {
 
         let mut v = MsgVisitor(String::new());
         event.record(&mut v);
-        let msg = if v.0.is_empty() { target.to_string() } else { v.0 };
+        let msg = if v.0.is_empty() {
+            target.to_string()
+        } else {
+            v.0
+        };
 
         let id = if is_net {
             crate::eventlog::ID_NET_CHANGED
