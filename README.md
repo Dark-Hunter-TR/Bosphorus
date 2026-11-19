@@ -598,6 +598,6 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 ## License
 
-Dual-licensed under **MIT OR Apache-2.0**, at your option (as declared in
-`Cargo.toml`). WinDivert is distributed under its own terms — see
+Licensed under **Apache-2.0** (see `LICENSE`; as declared in `Cargo.toml`).
+WinDivert is distributed under its own terms — see
 `assets/WinDivert-2.2.2-A/LICENSE`.

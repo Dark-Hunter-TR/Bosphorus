@@ -614,6 +614,6 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 ## Lisans
 
-`Cargo.toml`'da bildirildiği üzere, tercihinize göre **MIT VEYA Apache-2.0**
-altında çift lisanslıdır. WinDivert kendi şartları altında dağıtılır — bkz.
+**Apache-2.0** lisanslıdır (`LICENSE` dosyasına ve `Cargo.toml` bildirimine
+bakın). WinDivert kendi şartları altında dağıtılır — bkz.
 `assets/WinDivert-2.2.2-A/LICENSE`.
