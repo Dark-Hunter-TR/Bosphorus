@@ -35,7 +35,9 @@ impl Discovery {
     pub fn new(cfg: &EvasionConfig) -> Self {
         Self {
             generator: DefaultGenerator::new(cfg),
-            scheduler: Scheduler { tuning: cfg.discovery.clone() },
+            scheduler: Scheduler {
+                tuning: cfg.discovery.clone(),
+            },
             targets: Mutex::new(HashMap::new()),
             isp_pool: OnceLock::new(),
         }
@@ -118,49 +120,45 @@ impl Discovery {
     }
 
     /// Restore targets from a loaded profile. For each target: if every
-    /// persisted `StrategyId` still exists in the live grid, the sweep state is
-    /// fully restored (so an `Exhausted` target can revive under a grown grid);
-    /// otherwise the ids were renumbered — drop `tried`/`scores`/`active`, keep
-    /// only the learned server TTL. Returns `(restored, degraded)` counts.
+    /// persisted `StrategyId` still exists in the live grid and the state is
+    /// internally consistent, the sweep state is fully restored (so an
+    /// `Exhausted` target can revive under a grown grid); otherwise the
+    /// per-strategy data is dropped and only sanitized path hints are kept.
+    /// Returns `(restored, degraded)` counts.
+    ///
+    /// The on-disk profile is treated as untrusted input: learned hints are
+    /// range-checked, strategy payloads are resolved from the live grid (never
+    /// trusted from disk), and inconsistent targets degrade to hints-only.
     pub fn load_persisted(&self, file: &ProfileFile) -> (usize, usize) {
         let now = Instant::now();
-        let live: HashSet<StrategyId> =
-            self.generator.all().iter().map(|s| s.id()).collect();
+        let live: HashSet<StrategyId> = self.generator.all().iter().map(|s| s.id()).collect();
         let (mut restored, mut degraded) = (0usize, 0usize);
         let mut map = self.targets.lock();
 
         for pt in &file.targets {
+            let mut ts = TargetState::new(pt.key.clone(), now);
+            ts.from_disk = true;
+            ts.server_initial_ttl = sanitize_server_initial_ttl(pt.server_initial_ttl);
+            ts.injector_hops = sanitize_injector_hops(pt.injector_hops);
+
             let ids_ok = pt.tried.iter().all(|id| live.contains(id))
                 && pt.scores.iter().all(|s| live.contains(&s.strategy.id()))
                 && pt.active.map_or(true, |id| live.contains(&id));
 
-            let mut ts = TargetState::new(pt.key.clone(), now);
-            ts.from_disk = true;
-            ts.server_initial_ttl = pt.server_initial_ttl;
-            ts.injector_hops = pt.injector_hops;
-
             if ids_ok {
-                ts.phase = pt.phase;
-                ts.tried = pt.tried.clone();
-                ts.active = pt.active;
-                ts.consecutive_failure = pt.consecutive_failure;
-                ts.grid_size_at_exhaustion = pt.grid_size_at_exhaustion;
-                for sc in &pt.scores {
-                    ts.scores.insert(
-                        sc.strategy.id(),
-                        ScoredStrategy {
-                            strategy: sc.strategy.clone(),
-                            trials: sc.trials,
-                            successes: sc.successes,
-                            // Not persisted — a reloaded sweep restarts the
-                            // "in a row" count for every candidate.
-                            consecutive_success: 0,
-                            last_success: None,
-                            quality: sc.quality.clone(),
-                        },
-                    );
+                if let Some((phase, tried, active, scores, cf, gse)) =
+                    sanitize_restored_target(pt, &self.generator)
+                {
+                    ts.phase = phase;
+                    ts.tried = tried;
+                    ts.active = active;
+                    ts.consecutive_failure = cf;
+                    ts.grid_size_at_exhaustion = gse;
+                    ts.scores = scores;
+                    restored += 1;
+                } else {
+                    degraded += 1;
                 }
-                restored += 1;
             } else {
                 degraded += 1;
             }
@@ -338,7 +336,9 @@ impl Discovery {
                 tried: ts.tried.len(),
                 total,
                 in_flight: ts.in_flight.len(),
-                last_trial_age: ts.last_assigned_at.map(|t| now.saturating_duration_since(t)),
+                last_trial_age: ts
+                    .last_assigned_at
+                    .map(|t| now.saturating_duration_since(t)),
                 from_disk: ts.from_disk,
                 active: ts
                     .active
@@ -362,9 +362,112 @@ impl Discovery {
     }
 }
 
+fn sanitize_server_initial_ttl(v: Option<u8>) -> Option<u8> {
+    match v {
+        Some(64) | Some(128) | Some(255) => v,
+        _ => None,
+    }
+}
+
+fn sanitize_injector_hops(v: Option<u8>) -> Option<u8> {
+    v.filter(|h| *h <= 64)
+}
+
+fn sanitize_restored_target(
+    pt: &PersistedTarget,
+    gen: &DefaultGenerator,
+) -> Option<(
+    NetPhase,
+    Vec<StrategyId>,
+    Option<StrategyId>,
+    HashMap<StrategyId, ScoredStrategy>,
+    u8,
+    Option<usize>,
+)> {
+    let mut tried = Vec::with_capacity(pt.tried.len());
+    let mut seen = HashSet::new();
+    for id in &pt.tried {
+        if !seen.insert(*id) {
+            continue;
+        }
+        if gen.get_by_id(*id).is_none() {
+            return None;
+        }
+        tried.push(*id);
+    }
+
+    let mut scores = HashMap::new();
+    for sc in &pt.scores {
+        let id = sc.strategy.id();
+        let Some(canon) = gen.get_by_id(id) else {
+            return None;
+        };
+        if !tried.contains(&id) && pt.active != Some(id) {
+            continue;
+        }
+        if sc.successes > sc.trials {
+            return None;
+        }
+        scores.insert(
+            id,
+            ScoredStrategy {
+                strategy: canon.clone(),
+                trials: sc.trials,
+                successes: sc.successes,
+                consecutive_success: 0,
+                last_success: None,
+                quality: sc.quality.clone(),
+            },
+        );
+    }
+
+    let active = match pt.active {
+        Some(id) => {
+            if !scores.contains_key(&id) {
+                return None;
+            }
+            Some(id)
+        }
+        None => None,
+    };
+
+    let phase = match pt.phase {
+        NetPhase::Probe | NetPhase::Discover => {
+            if active.is_some() {
+                return None;
+            }
+            pt.phase
+        }
+        NetPhase::Active => {
+            // export never persists Active passthrough; require a promoted strategy
+            if active.is_none() {
+                return None;
+            }
+            NetPhase::Active
+        }
+        NetPhase::Exhausted => {
+            if active.is_some() || pt.grid_size_at_exhaustion.is_none() {
+                return None;
+            }
+            NetPhase::Exhausted
+        }
+    };
+
+    Some((
+        phase,
+        tried,
+        active,
+        scores,
+        pt.consecutive_failure,
+        pt.grid_size_at_exhaustion,
+    ))
+}
+
 /// Most recent activity of any kind on a target (assignment or verdict).
 fn last_activity(ts: &TargetState) -> Instant {
-    ts.last_assigned_at.unwrap_or(ts.created_at).max(ts.updated_at)
+    ts.last_assigned_at
+        .unwrap_or(ts.created_at)
+        .max(ts.updated_at)
 }
 
 /// Crude registered domain (eTLD+1) — no Public Suffix List. Keeps the last two
@@ -380,7 +483,11 @@ fn registered_domain(host: &str) -> &str {
     const SLD: &[&str] = &["co", "com", "net", "org", "gov", "edu", "ac"];
     let last = labels[labels.len() - 1];
     let penult = labels[labels.len() - 2];
-    let take = if last.len() == 2 && SLD.contains(&penult) { 3 } else { 2 };
+    let take = if last.len() == 2 && SLD.contains(&penult) {
+        3
+    } else {
+        2
+    };
     let start = labels.len() - take;
     let byte_off: usize = labels[..start].iter().map(|l| l.len() + 1).sum();
     &host[byte_off..]
@@ -390,12 +497,14 @@ fn registered_domain(host: &str) -> &str {
 /// first, then lowest observed latency. Used to break ties in the seed list.
 fn better_seed(a: &StrategyQuality, b: &StrategyQuality) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    b.looks_fast().cmp(&a.looks_fast()).then_with(|| match (a.min_latency, b.min_latency) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    })
+    b.looks_fast()
+        .cmp(&a.looks_fast())
+        .then_with(|| match (a.min_latency, b.min_latency) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        })
 }
 
 /// Build the seed list for a `Discover` target from what already works on this
@@ -409,16 +518,16 @@ fn better_seed(a: &StrategyQuality, b: &StrategyQuality) -> std::cmp::Ordering {
 ///
 /// Ids are deduped across layers (first tier wins). Empty when there is nothing
 /// `Active` to learn from.
-fn build_seeds(
-    map: &HashMap<String, TargetState>,
-    target: &str,
-) -> Vec<(StrategyId, SeedTier)> {
+fn build_seeds(map: &HashMap<String, TargetState>, target: &str) -> Vec<(StrategyId, SeedTier)> {
     let reg = registered_domain(target);
     let mut out: Vec<(StrategyId, SeedTier)> = Vec::new();
     let mut seen: HashSet<StrategyId> = HashSet::new();
 
     let quality_of = |ts: &TargetState, id: StrategyId| -> StrategyQuality {
-        ts.scores.get(&id).map(|s| s.quality.clone()).unwrap_or_default()
+        ts.scores
+            .get(&id)
+            .map(|s| s.quality.clone())
+            .unwrap_or_default()
     };
 
     // --- 1. domain-sibling promoted strategies ---
@@ -450,7 +559,11 @@ fn build_seeds(
         e.0 += 1;
     }
     let mut house: Vec<(StrategyId, (u32, StrategyQuality))> = freq.into_iter().collect();
-    house.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| better_seed(&a.1 .1, &b.1 .1)));
+    house.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0)
+            .then_with(|| better_seed(&a.1 .1, &b.1 .1))
+    });
     for (id, _) in house.into_iter().take(3) {
         if seen.insert(id) {
             out.push((id, SeedTier::HouseStrategy));
@@ -533,7 +646,10 @@ mod tests {
     /// `n` single-split candidates: `frag@<off>`, wrong-seq.
     fn tiny_gen(offsets: &[u16]) -> DefaultGenerator {
         DefaultGenerator::with_axes(&GridAxes {
-            frag_anchor: offsets.iter().map(|o| Some(SplitAnchor::AbsoluteOffset(*o))).collect(),
+            frag_anchor: offsets
+                .iter()
+                .map(|o| Some(SplitAnchor::AbsoluteOffset(*o)))
+                .collect(),
             frag_reverse: vec![false],
             desync: vec![DesyncKind::WrongSeq],
             repeats: vec![1],
@@ -612,7 +728,10 @@ mod tests {
 
         let working = file.targets.iter().find(|t| t.key == w).unwrap();
         assert_eq!(working.phase, NetPhase::Active);
-        assert!(working.active.is_some(), "the promoted strategy is persisted");
+        assert!(
+            working.active.is_some(),
+            "the promoted strategy is persisted"
+        );
 
         // Round-trips cleanly: reload restores exactly the two kept targets.
         let d2 = Discovery::new(&EvasionConfig::default());
@@ -631,8 +750,16 @@ mod tests {
         a.record(t, None, FlowOutcome::DpiReset); // -> Discover
 
         let x = a.assign(t, Some(128));
-        let fast = VerdictTiming { latency: Some(Duration::from_millis(180)), retx: 0, injector_hops: None };
-        let faster = VerdictTiming { latency: Some(Duration::from_millis(150)), retx: 0, injector_hops: None };
+        let fast = VerdictTiming {
+            latency: Some(Duration::from_millis(180)),
+            retx: 0,
+            injector_hops: None,
+        };
+        let faster = VerdictTiming {
+            latency: Some(Duration::from_millis(150)),
+            retx: 0,
+            injector_hops: None,
+        };
         a.record_timed(t, x.id, FlowOutcome::Success, fast);
         a.record_timed(t, x.id, FlowOutcome::Success, faster); // 2nd success -> promoted
 
@@ -671,10 +798,20 @@ mod tests {
             t,
             x.id,
             FlowOutcome::Success,
-            VerdictTiming { latency: Some(Duration::from_millis(1300)), retx: 1, injector_hops: None },
+            VerdictTiming {
+                latency: Some(Duration::from_millis(1300)),
+                retx: 1,
+                injector_hops: None,
+            },
         );
         let m = a.targets.lock();
-        let q = &m.get(t).unwrap().scores.get(&x.id.unwrap()).unwrap().quality;
+        let q = &m
+            .get(t)
+            .unwrap()
+            .scores
+            .get(&x.id.unwrap())
+            .unwrap()
+            .quality;
         assert_eq!(q.slow_successes, 1);
         assert_eq!(q.retx_free_successes, 0);
         assert!(!q.looks_fast());
@@ -696,7 +833,11 @@ mod tests {
             t,
             probe.id,
             FlowOutcome::DpiReset,
-            VerdictTiming { latency: None, retx: 0, injector_hops: Some(4) },
+            VerdictTiming {
+                latency: None,
+                retx: 0,
+                injector_hops: Some(4),
+            },
         );
 
         let next = a.assign(t, None);
@@ -708,16 +849,27 @@ mod tests {
             t,
             next.id,
             FlowOutcome::DpiReset,
-            VerdictTiming { latency: None, retx: 0, injector_hops: Some(9) },
+            VerdictTiming {
+                latency: None,
+                retx: 0,
+                injector_hops: Some(9),
+            },
         );
-        assert_eq!(a.assign(t, None).discovered_ttl, Some(4), "first measurement wins");
+        assert_eq!(
+            a.assign(t, None).discovered_ttl,
+            Some(4),
+            "first measurement wins"
+        );
     }
 
     // --- Phase 2: sibling / house-strategy seeding ---
 
     #[test]
     fn registered_domain_crude_etld_plus_one() {
-        assert_eq!(registered_domain("gateway-us-east1-c.discord.gg"), "discord.gg");
+        assert_eq!(
+            registered_domain("gateway-us-east1-c.discord.gg"),
+            "discord.gg"
+        );
         assert_eq!(registered_domain("cdn.discordapp.com"), "discordapp.com");
         assert_eq!(registered_domain("updates.discord.com"), "discord.com");
         assert_eq!(registered_domain("discord.com"), "discord.com");
@@ -743,7 +895,11 @@ mod tests {
 
         for i in 0..6 {
             let a = disc.assign(t, None);
-            assert_eq!(a.id, Some(g.all()[i].id()), "candidate {i} follows grid order");
+            assert_eq!(
+                a.id,
+                Some(g.all()[i].id()),
+                "candidate {i} follows grid order"
+            );
             assert_eq!(a.seed_tier, None, "no seed offered with nothing Active");
             disc.record(t, a.id, FlowOutcome::DpiReset);
         }
@@ -761,7 +917,10 @@ mod tests {
         disc.assign(t, None);
         disc.record(t, None, FlowOutcome::DpiReset);
         let a = disc.assign(t, None);
-        assert_eq!(a.seed_tier, None, "an Active-passthrough sibling has no strategy to seed");
+        assert_eq!(
+            a.seed_tier, None,
+            "an Active-passthrough sibling has no strategy to seed"
+        );
     }
 
     #[test]
@@ -789,16 +948,28 @@ mod tests {
         // not grid[0].
         let fresh = "status.discord.com";
         let a = disc.assign(fresh, None);
-        assert_eq!(a.id, Some(id1), "domain-sibling strategy seeded ahead of the grid");
+        assert_eq!(
+            a.id,
+            Some(id1),
+            "domain-sibling strategy seeded ahead of the grid"
+        );
         assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
-        assert_eq!(disc.target_phase(fresh), Some(NetPhase::Discover), "no naked Probe");
+        assert_eq!(
+            disc.target_phase(fresh),
+            Some(NetPhase::Discover),
+            "no naked Probe"
+        );
 
         // #4: a domain-sibling seed promotes on its FIRST success.
         let (ev, phase) = disc.record(fresh, Some(id1), FlowOutcome::Success).unwrap();
         assert!(
             matches!(
                 ev,
-                DiscoveryEvent::Promoted { via_seed: Some(SeedTier::DomainSibling), after: 1, .. }
+                DiscoveryEvent::Promoted {
+                    via_seed: Some(SeedTier::DomainSibling),
+                    after: 1,
+                    ..
+                }
             ),
             "got {ev:?}"
         );
@@ -872,6 +1043,75 @@ mod tests {
     }
 
     #[test]
+    fn load_sanitizes_untrusted_hints_and_rejects_inconsistent_targets() {
+        use crate::profile::persist::{PersistedScore, PersistedTarget, ProfileFile};
+        use crate::profile::StrategyQuality;
+
+        let d = Discovery::new(&EvasionConfig::default());
+        let live = d.generator.all()[0].clone();
+        let live_id = live.id();
+
+        // Bogus path hints are dropped; a valid Active state is restored using
+        // the live-grid strategy (never the untrusted file payload).
+        let file = ProfileFile::new(
+            d.grid_signature(),
+            "k",
+            vec![PersistedTarget {
+                key: "ok.example".into(),
+                phase: NetPhase::Active,
+                tried: vec![live_id],
+                scores: vec![PersistedScore {
+                    strategy: live.clone(),
+                    trials: 3,
+                    successes: 2,
+                    quality: StrategyQuality::default(),
+                }],
+                active: Some(live_id),
+                consecutive_failure: 0,
+                server_initial_ttl: Some(42),
+                injector_hops: Some(200),
+                grid_size_at_exhaustion: None,
+            }],
+        );
+        assert_eq!(d.load_persisted(&file), (1, 0));
+        let m = d.targets.lock();
+        let ts = m.get("ok.example").unwrap();
+        assert_eq!(ts.server_initial_ttl, None);
+        assert_eq!(ts.injector_hops, None);
+        assert_eq!(ts.phase, NetPhase::Active);
+        assert_eq!(ts.active, Some(live_id));
+        assert_eq!(ts.scores.get(&live_id).unwrap().strategy, live);
+        drop(m);
+
+        // Inconsistent (Exhausted without grid_size_at_exhaustion): degrade to
+        // hints-only Probe, but keep sanitized path hints.
+        let bad = ProfileFile::new(
+            d.grid_signature(),
+            "k",
+            vec![PersistedTarget {
+                key: "bad.example".into(),
+                phase: NetPhase::Exhausted,
+                tried: vec![live_id],
+                scores: vec![],
+                active: None,
+                consecutive_failure: 0,
+                server_initial_ttl: Some(128),
+                injector_hops: Some(5),
+                grid_size_at_exhaustion: None,
+            }],
+        );
+        let d2 = Discovery::new(&EvasionConfig::default());
+        assert_eq!(d2.load_persisted(&bad), (0, 1));
+        let m = d2.targets.lock();
+        let ts = m.get("bad.example").unwrap();
+        assert_eq!(ts.phase, NetPhase::Probe);
+        assert!(ts.tried.is_empty());
+        assert!(ts.active.is_none());
+        assert_eq!(ts.server_initial_ttl, Some(128));
+        assert_eq!(ts.injector_hops, Some(5));
+    }
+
+    #[test]
     fn stale_strategy_ids_degrade_to_ttl_only() {
         let file = ProfileFile::new(
             0, // deliberately wrong signature
@@ -937,7 +1177,11 @@ mod tests {
         // Session 2: reload under a 3-candidate grid (ids of 2 & 3 unchanged).
         let s2 = Discovery::with_generator(tiny_gen(&[2, 3, 4]), tuning);
         let (restored, degraded) = s2.load_persisted(&file);
-        assert_eq!((restored, degraded), (1, 0), "ids still valid -> full restore");
+        assert_eq!(
+            (restored, degraded),
+            (1, 0),
+            "ids still valid -> full restore"
+        );
 
         // First assignment revives it.
         let a = s2.assign(t, None);
@@ -997,7 +1241,10 @@ mod tests {
     #[test]
     fn evict_enforces_the_hard_cap_worst_first() {
         let cfg = EvasionConfig {
-            discovery: crate::config::DiscoveryTuning { max_targets: 3, ..Default::default() },
+            discovery: crate::config::DiscoveryTuning {
+                max_targets: 3,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let disc = Discovery::new(&cfg);
@@ -1108,7 +1355,10 @@ mod tests {
     fn windows_server_never_gets_an_overlap_candidate() {
         use crate::strategy::generator::is_overlap_family;
         // Overlap opted in — otherwise there is nothing to gate.
-        let cfg = EvasionConfig { enable_overlap_disorder: true, ..Default::default() };
+        let cfg = EvasionConfig {
+            enable_overlap_disorder: true,
+            ..Default::default()
+        };
         let disc = Discovery::new(&cfg);
         let t = "win.example";
 
@@ -1133,7 +1383,10 @@ mod tests {
             }
         }
         assert!(saw_any, "at least the non-overlap grid was swept");
-        assert!(!saw_overlap, "Windows server must never be assigned an overlap-family strategy");
+        assert!(
+            !saw_overlap,
+            "Windows server must never be assigned an overlap-family strategy"
+        );
 
         // The same target on a unix server (TTL 64) *would* see overlap candidates.
         let disc2 = Discovery::new(&cfg);
@@ -1152,7 +1405,10 @@ mod tests {
                 None => break,
             }
         }
-        assert!(saw_overlap_unix, "unix server sweeps overlap candidates too");
+        assert!(
+            saw_overlap_unix,
+            "unix server sweeps overlap candidates too"
+        );
     }
 
     // ---- C: ISP seed pool ------------------------------------------------- #
@@ -1176,7 +1432,10 @@ mod tests {
         // Fresh target, nothing Active on this network: the ISP-pool candidate is
         // the only seed, and it must NOT skip the naked Probe.
         let a = disc.assign("fresh.example", None);
-        assert!(a.id.is_none() && a.event.is_none(), "naked Probe still runs");
+        assert!(
+            a.id.is_none() && a.event.is_none(),
+            "naked Probe still runs"
+        );
         assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Probe));
 
         // Probe fails -> Discover -> ISP-pool strategy offered ahead of grid[0].
@@ -1187,7 +1446,9 @@ mod tests {
 
         // One success is not enough — IspPool keeps the default threshold (2),
         // unlike DomainSibling / HouseStrategy.
-        let (ev, _) = disc.record("fresh.example", Some(id5), FlowOutcome::Success).unwrap();
+        let (ev, _) = disc
+            .record("fresh.example", Some(id5), FlowOutcome::Success)
+            .unwrap();
         assert!(matches!(ev, DiscoveryEvent::Noted), "got {ev:?}");
         assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Discover));
     }
