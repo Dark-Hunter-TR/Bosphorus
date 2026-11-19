@@ -47,7 +47,7 @@ fn is_default_service_path(path: &Path) -> bool {
 #[cfg(windows)]
 fn harden_dir(dir: &Path) -> std::io::Result<()> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{LocalFree, BOOL, HLOCAL};
+    use windows::Win32::Foundation::{BOOL, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
@@ -55,6 +55,7 @@ fn harden_dir(dir: &Path) -> std::io::Result<()> {
         GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     };
+    use windows::Win32::System::Memory::LocalFree;
 
     // Protected DACL: no inheritance from parent; grant Full Control to
     // LocalSystem and Built-in Administrators. (OI)(CI) lets child files/dirs
@@ -72,16 +73,18 @@ fn harden_dir(dir: &Path) -> std::io::Result<()> {
             &mut sd,
             None,
         )
+        .ok()
         .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
     }
 
     let result = (|| unsafe {
-        let mut present = BOOL::from(false);
+        let mut present: i32 = 0;
         let mut dacl: *mut ACL = std::ptr::null_mut();
-        let mut defaulted = BOOL::from(false);
+        let mut defaulted: i32 = 0;
         GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted)
+            .ok()
             .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
-        if !present.as_bool() || dacl.is_null() {
+        if present == 0 || dacl.is_null() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "SDDL conversion produced no DACL",
@@ -106,7 +109,7 @@ fn harden_dir(dir: &Path) -> std::io::Result<()> {
 
     // SAFETY: `sd` was allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
     unsafe {
-        let _ = LocalFree(HLOCAL(sd.0));
+        let _ = LocalFree(HLOCAL(sd.0 as _));
     }
     result
 }
