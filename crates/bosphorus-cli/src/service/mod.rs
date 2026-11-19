@@ -62,7 +62,7 @@ pub(crate) fn harden_service_dir(path: &std::path::Path) -> std::io::Result<()> 
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{LocalFree, BOOL, HLOCAL};
+        use windows::Win32::Foundation::{BOOL, HLOCAL};
         use windows::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
             SE_FILE_OBJECT,
@@ -71,6 +71,7 @@ pub(crate) fn harden_service_dir(path: &std::path::Path) -> std::io::Result<()> 
             GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
             PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
         };
+        use windows::Win32::System::Memory::LocalFree;
 
         // Protected DACL: Administrators and SYSTEM full control, inherited by children.
         let sddl: Vec<u16> = "D:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)\0"
@@ -87,16 +88,16 @@ pub(crate) fn harden_service_dir(path: &std::path::Path) -> std::io::Result<()> 
             .ok()
             .map_err(|e| std::io::Error::from_raw_os_error(e.code().0))?;
 
-            let mut present = BOOL(0);
-            let mut defaulted = BOOL(0);
+            let mut present: i32 = 0;
+            let mut defaulted: i32 = 0;
             let mut dacl: *mut ACL = std::ptr::null_mut();
             if !GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted).as_bool() {
                 let err = std::io::Error::last_os_error();
-                let _ = LocalFree(HLOCAL(sd.0));
+                let _ = LocalFree(HLOCAL(sd.0 as _));
                 return Err(err);
             }
-            if !present.as_bool() || dacl.is_null() {
-                let _ = LocalFree(HLOCAL(sd.0));
+            if present == 0 || dacl.is_null() {
+                let _ = LocalFree(HLOCAL(sd.0 as _));
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "security descriptor has no DACL",
@@ -117,7 +118,7 @@ pub(crate) fn harden_service_dir(path: &std::path::Path) -> std::io::Result<()> 
                 Some(dacl),
                 None,
             );
-            let _ = LocalFree(HLOCAL(sd.0));
+            let _ = LocalFree(HLOCAL(sd.0 as _));
             if status.0 != 0 {
                 return Err(std::io::Error::from_raw_os_error(status.0 as i32));
             }
