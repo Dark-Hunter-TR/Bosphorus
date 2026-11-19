@@ -17,8 +17,11 @@
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
 
 use crate::profile::{NetPhase, StrategyQuality};
 use crate::strategy::{Strategy, StrategyId};
@@ -101,12 +104,14 @@ pub fn profile_path(dir: &Path, net_key: &str) -> PathBuf {
     dir.join(format!("{}.json", sanitize(net_key)))
 }
 
-/// Write `bytes` to `path` atomically: a per-process staging file
-/// (`<path>.<pid>.tmp`) then a last-writer-wins rename. Two processes sharing one
-/// store never touch the same temp; the target is never left torn. Shared by the
-/// discovery profile and the ISP seed pool.
+/// Write `bytes` to `path` atomically: a per-attempt staging file
+/// (`<path>.<pid>.<n>.tmp`) then a last-writer-wins rename. Concurrent writers in
+/// the same process (e.g. tick vs shutdown persist) get distinct temps, so they
+/// never clobber each other's staging write; the target is never left torn.
+/// Shared by the discovery profile and the ISP seed pool.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    atomic_write_with_tag(path, bytes, &std::process::id().to_string())
+    let n = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+    atomic_write_with_tag(path, bytes, &format!("{}.{n}", std::process::id()))
 }
 
 fn atomic_write_with_tag(path: &Path, bytes: &[u8], tag: &str) -> io::Result<()> {
@@ -202,10 +207,11 @@ pub(crate) fn read_bounded(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Atomic write (see [`atomic_write`]): a per-process staging file then a
-/// last-writer-wins rename. Two processes pointed at the same store — the
-/// service and an interactive `--engine` sharing `%ProgramData%` — never write
-/// the same temp and never leave the target torn, but one can overwrite the
+/// Atomic write (see [`atomic_write`]): a per-attempt staging file then a
+/// last-writer-wins rename. Writers in the same process get distinct temps, so
+/// concurrent saves never clobber each other's staging write and the target is
+/// never left torn. Two processes pointed at the same store — the service and an
+/// interactive `--engine` sharing `%ProgramData%` — still may overwrite each
 /// other's incremental learning. The profile is a cache, not a ledger — the next
 /// session re-learns — so this is acceptable; callers just should not run both
 /// against one store for long stretches. Returns the JSON byte count.
@@ -383,5 +389,27 @@ mod tests {
             load(dir.path(), "newkey").is_some(),
             "subsequent loads use the migrated profile"
         );
+    }
+
+    #[test]
+    fn concurrent_saves_from_one_process_leave_a_valid_profile() {
+        // B3: tick + shutdown persist run in the same process and must not share
+        // a staging file (each attempt gets its own temp), or a rename can publish
+        // a torn/mixed JSON. Exercise the public save path from multiple threads.
+        let dir = tempfile::tempdir().unwrap();
+        let key = "net";
+        std::thread::scope(|s| {
+            for i in 0..8u8 {
+                let d = dir.path().to_path_buf();
+                s.spawn(move || {
+                    let mut f = sample();
+                    f.targets[0].key = format!("t{i}.example");
+                    save(&d, key, &f).unwrap();
+                });
+            }
+        });
+        let back = load(dir.path(), key).expect("concurrent saves must leave valid JSON");
+        assert_eq!(back.targets.len(), 1);
+        assert!(tmp_files(dir.path()).is_empty(), "no temp litter");
     }
 }
