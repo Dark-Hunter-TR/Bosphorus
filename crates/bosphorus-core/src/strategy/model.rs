@@ -300,26 +300,23 @@ impl Strategy {
     pub fn describe(&self) -> String {
         let mut s = String::new();
         if let Some(f) = &self.fake {
+            let is_overlap = matches!(f.desync, DesyncMethod::OverlapDisorder { .. });
             match f.desync {
                 DesyncMethod::OverlapDisorder { seqovl, .. } => {
                     s.push_str(&format!("overlap({seqovl})"));
                 }
-                _ => {
-                    let d = match f.desync {
-                        DesyncMethod::WrongSeq { .. } => "wrong-seq",
-                        DesyncMethod::WrongChecksum => "wrong-cksum",
-                        DesyncMethod::TtlLimited => "ttl",
-                        DesyncMethod::SeqPlusTtl { .. } => "seq+ttl",
-                        DesyncMethod::ChecksumPlusTtl => "cksum+ttl",
-                        DesyncMethod::OverlapDisorder { .. } => unreachable!(),
-                    };
-                    s.push_str(&format!("fake({d})"));
-                    if f.repeats > 1 {
-                        s.push_str(&format!("x{}", f.repeats));
-                    }
-                    if f.payload == FakePayload::AggressiveClientHello {
-                        s.push_str("+big");
-                    }
+                DesyncMethod::WrongSeq { .. } => s.push_str("fake(wrong-seq)"),
+                DesyncMethod::WrongChecksum => s.push_str("fake(wrong-cksum)"),
+                DesyncMethod::TtlLimited => s.push_str("fake(ttl)"),
+                DesyncMethod::SeqPlusTtl { .. } => s.push_str("fake(seq+ttl)"),
+                DesyncMethod::ChecksumPlusTtl => s.push_str("fake(cksum+ttl)"),
+            }
+            if !is_overlap {
+                if f.repeats > 1 {
+                    s.push_str(&format!("x{}", f.repeats));
+                }
+                if f.payload == FakePayload::AggressiveClientHello {
+                    s.push_str("+big");
                 }
             }
         }
@@ -401,6 +398,19 @@ mod tests {
 
         let padded = Strategy { tls_pad: Some(512), ..multi };
         assert_eq!(padded.describe(), "frag@tls,sni(rev)+pad(512)");
+
+        let overlap = Strategy {
+            fake: Some(FakeSpec {
+                desync: DesyncMethod::OverlapDisorder { seqovl: 16, fill: OverlapFill::Zeros },
+                ttl: None,
+                payload: FakePayload::StaticClientHello,
+                repeats: 1,
+            }),
+            fragment: Some(FragmentSpec::one(SplitAnchor::AbsoluteOffset(2), false)),
+            order: SendOrder::FakeThenReal,
+            tls_pad: None,
+        };
+        assert_eq!(overlap.describe(), "overlap(16)+frag@2");
     }
 
     #[test]
