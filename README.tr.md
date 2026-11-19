@@ -82,7 +82,7 @@ istiyorsanız [atlatma araç kutusuna](#atlatma-araç-kutusu) geçebilirsiniz.
 
 ## Ayrıntılı olarak nasıl çalışır
 
-Her paket — gelen ya da giden — tek bir WinDivert tanıtıcısından ve üç iç
+Her paket — gelen ya da giden — ana bir WinDivert yakalama tanıtıcısından ve üç iç
 aşamadan geçer:
 
 - **conntrack**, bir bağlantının ham paketlerini bir karara dönüştürür:
@@ -98,13 +98,13 @@ bir JSON dosyasına periyodik olarak yazılır (bkz.
 
 ### Yakalama yolu
 
-`NETWORK` katmanındaki tek bir WinDivert tanıtıcısı, bilinçli olarak dar bir
+`NETWORK` katmanındaki ana WinDivert tanıtıcısı, bilinçli olarak dar bir
 trafik dilimini yakalar (filtre parçaları GoodbyeDPI'dan bire bir alınmıştır):
 
-- **443** portuna giden, istek ya da TLS handshake'ine benzeyen **giden** TCP
+- **Yapılandırılmış bir TLS portuna** (varsayılan olarak 443 ve Cloudflare'un HTTPS alt portları 2053, 2083, 2087, 2096, 8443) giden, istek ya da TLS handshake'ine benzeyen **giden** TCP
   (yük 1200 bayttan küçük, ya da `GET `/`POST` ile başlıyor, ya da bir TLS
   kayıt başlığı).
-- 443 portundan gelen ve bir karar sinyali taşıyan **gelen** trafik: `SYN`+`ACK`
+- Yapılandırılmış bir TLS portundan gelen ve bir karar sinyali taşıyan **gelen** trafik: `SYN`+`ACK`
   (TTL'i sunucunun yığınını ve atlama sayısını söyler), bir `RST`, ya da
   `0x16` ile başlayan ilk veri segmenti (bir `ServerHello`).
 - Loopback ve özel/link-local adres aralıkları her iki yönde de dışlanır.
@@ -228,7 +228,7 @@ Bunun kime uygulandığı ise işin bütün özüdür:
 | `--quic` | Ne olur |
 |---|---|
 | `blocked` *(varsayılan)* | Yalnızca bir sansürcünün gerçekten bağlantı sıfırladığı yakalanan hedefler HTTP/3'ü kaybeder. Diğer her şey onu korur. |
-| `all` | Makinedeki her HTTP/3 bağlantısı reddedilir — GoodbyeDPI'ın yaklaşımı. Öğrenme gerektirmez; QUIC'i her yerde kaybettirir. |
+| `all` | Makinedeki her HTTP/3 bağlantısı reddedilir — GoodbyeDPI'ın yaklaşımı. Öğrenme gerektirmez; QUIC'i her yerde kaybettirir (ayrı bir yalnızca-bırak WinDivert tanıtıcısı üzerinden). |
 | `off` | QUIC'e hiç dokunulmaz. Engelli bir site HTTP/3 üzerinden açılmamaya devam edebilir. |
 
 Varsayılanda bir hedef yalnızca TCP tarafında görülen **gerçek bir sıfırlama**
@@ -583,8 +583,8 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 ## Sınırlamalar ve kapsam dışı
 
-- **Yalnızca Windows**, ve yalnızca 443 portunda TLS-üzeri-TCP. Düz HTTP ve
-  başka portlardaki TLS işlenmez.
+- **Yalnızca Windows**, ve yalnızca yapılandırılmış TLS portlarında (varsayılan olarak 443 ve Cloudflare'un HTTPS alt portları 2053, 2083, 2087, 2096, 8443) TLS-üzeri-TCP. Düz HTTP ve
+  varsayılan olarak diğer portlardaki TLS işlenmez.
 - **QUIC/HTTP-3 atlatılmaz, reddedilir.** Bosphorus engelli bir siteyi TCP'ye
   geri düşürebilir ([QUIC politikası](#quic-ve-http3)) — orada bir stratejisi
   vardır — ama QUIC'in kendisi için bir atlatma stratejisi yoktur, çünkü QUIC

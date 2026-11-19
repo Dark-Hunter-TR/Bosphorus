@@ -82,7 +82,7 @@ tricks.
 
 ## How it works, in detail
 
-Every packet — inbound or outbound — passes through one WinDivert handle and
+Every packet — inbound or outbound — passes through a main WinDivert capture handle and
 three internal stages:
 
 - **conntrack** turns raw packets for one connection into a verdict: did the
@@ -97,13 +97,13 @@ to the network you're currently on (see [NetKey](#per-network-memory-netkey)).
 
 ### The capture path
 
-A single WinDivert handle at the `NETWORK` layer captures a deliberately
+A main WinDivert handle at the `NETWORK` layer captures a deliberately
 narrow slice of traffic (filter fragments taken verbatim from GoodbyeDPI):
 
-- **Outbound** TCP to port 443 that looks like a request or a TLS handshake
+- **Outbound** TCP to a configured TLS port (443 and Cloudflare's HTTPS alt ports 2053, 2083, 2087, 2096, 8443 by default) that looks like a request or a TLS handshake
   (payload under 1200 bytes, or starting with `GET `/`POST`, or a TLS record
   header).
-- **Inbound** from port 443 that carries a verdict signal: the `SYN`+`ACK`
+- **Inbound** from a configured TLS port that carries a verdict signal: the `SYN`+`ACK`
   (its TTL tells us the server's stack and hop count), a `RST`, or the first
   data segment starting with `0x16` (a `ServerHello`).
 - Loopback and private/link-local address ranges are excluded on both sides.
@@ -225,7 +225,7 @@ Who that applies to is the whole point:
 | `--quic` | What happens |
 |---|---|
 | `blocked` *(default)* | Only destinations where a censor was actually caught resetting a connection lose HTTP/3. Everything else keeps it. |
-| `all` | Every HTTP/3 connection on the machine is refused — GoodbyeDPI's approach. No learning needed; costs QUIC everywhere. |
+| `all` | Every HTTP/3 connection on the machine is refused — GoodbyeDPI's approach. No learning needed; costs QUIC everywhere (via a separate drop-only WinDivert handle). |
 | `off` | QUIC is never touched. A blocked site may keep failing over HTTP/3. |
 
 Under the default, a destination is marked only by a **real reset** (`DpiReset`
@@ -569,8 +569,8 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 ## Limitations & out of scope
 
-- **Windows only**, and only TLS-over-TCP on port 443. Plain HTTP and TLS on
-  other ports aren't handled.
+- **Windows only**, and only TLS-over-TCP on the configured TLS ports (443 and Cloudflare's HTTPS alt ports 2053, 2083, 2087, 2096, 8443 by default). Plain HTTP and TLS on
+  other ports aren't handled by default.
 - **QUIC/HTTP-3 is refused, not bypassed.** Bosphorus can push a blocked site
   back onto TCP (see [the QUIC policy](#quic-and-http3)), where it does have a
   strategy — but it has no evasion strategies for QUIC itself, because the name
