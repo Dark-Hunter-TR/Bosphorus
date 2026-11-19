@@ -43,20 +43,76 @@ impl FlowTable {
     }
 
     fn shard(&self, key: &FlowKey) -> &Mutex<HashMap<FlowKey, FlowState>> {
+        &self.shards[Self::shard_index(key)]
+    }
+
+    fn shard_index(key: &FlowKey) -> usize {
         // Cheap spread over the tuple; FlowKey isn't Hash-into-usize directly.
         let mut h = 0u64;
-        for b in key_bytes(key) {
+        let mut feed = |b: u8| {
             h = h.wrapping_mul(0x100000001b3).wrapping_add(b as u64);
+        };
+        match key.client_ip {
+            std::net::IpAddr::V4(a) => {
+                for b in a.octets() {
+                    feed(b);
+                }
+            }
+            std::net::IpAddr::V6(a) => {
+                for b in a.octets() {
+                    feed(b);
+                }
+            }
         }
-        &self.shards[(h as usize) % SHARDS]
+        match key.server_ip {
+            std::net::IpAddr::V4(a) => {
+                for b in a.octets() {
+                    feed(b);
+                }
+            }
+            std::net::IpAddr::V6(a) => {
+                for b in a.octets() {
+                    feed(b);
+                }
+            }
+        }
+        for b in key.client_port.to_be_bytes() {
+            feed(b);
+        }
+        for b in key.server_port.to_be_bytes() {
+            feed(b);
+        }
+        (h as usize) % SHARDS
     }
 
     /// Get-or-create the flow, bump `last_seen`, run `f` against it.
-    pub fn with_mut<R>(&self, key: FlowKey, now: Instant, f: impl FnOnce(&mut FlowState) -> R) -> R {
+    pub fn with_mut<R>(
+        &self,
+        key: FlowKey,
+        now: Instant,
+        f: impl FnOnce(&mut FlowState) -> R,
+    ) -> R {
         let mut g = self.shard(&key).lock();
         let st = g.entry(key).or_insert_with(|| FlowState::new(now));
         st.last_seen = now;
         f(st)
+    }
+
+    /// Get-or-create the flow, bump `last_seen`, run `f`, and return its result
+    /// together with a read-only snapshot from the same lock acquisition.
+    pub fn with_mut_snapshot<R, S>(
+        &self,
+        key: FlowKey,
+        now: Instant,
+        f: impl FnOnce(&mut FlowState) -> R,
+        snap: impl FnOnce(&FlowState) -> S,
+    ) -> (R, S) {
+        let mut g = self.shard(&key).lock();
+        let st = g.entry(key).or_insert_with(|| FlowState::new(now));
+        st.last_seen = now;
+        let r = f(st);
+        let s = snap(st);
+        (r, s)
     }
 
     /// Read-only peek at an existing flow.
@@ -135,31 +191,13 @@ impl FlowTable {
                         outcome: o,
                         target_key: st.target_key.clone(),
                         trial: st.trial,
-                        latency: st
-                            .client_hello_at
-                            .map(|t| now.saturating_duration_since(t)),
+                        latency: st.client_hello_at.map(|t| now.saturating_duration_since(t)),
                         retx: st.client_hello_retx,
                     });
                 }
             }
         }
         out
-    }
-}
-
-fn key_bytes(k: &FlowKey) -> impl Iterator<Item = u8> + '_ {
-    let cip = ip_octets(k.client_ip);
-    let sip = ip_octets(k.server_ip);
-    cip.into_iter()
-        .chain(sip)
-        .chain(k.client_port.to_be_bytes())
-        .chain(k.server_port.to_be_bytes())
-}
-
-fn ip_octets(ip: std::net::IpAddr) -> Vec<u8> {
-    match ip {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
     }
 }
 
@@ -207,7 +245,10 @@ mod tests {
             t.with_mut(key(1024 + p as u16 % 60000), start, |_| {});
         }
         let (_, cap_peak) = t.stats();
-        assert!(cap_peak > 2000, "capacity grew with the burst (cap={cap_peak})");
+        assert!(
+            cap_peak > 2000,
+            "capacity grew with the burst (cap={cap_peak})"
+        );
 
         // All age out; the next sweep must give the allocation back.
         let removed = t.sweep(start + Duration::from_secs(60));
