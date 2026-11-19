@@ -419,7 +419,7 @@ pub fn check_filters() -> anyhow::Result<()> {
         (
             "dns-upstream=9.9.9.9",
             EvasionConfig {
-                dns_upstream: Some("9.9.9.9".parse().unwrap()),
+                dns_upstream: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9))),
                 ..Default::default()
             },
         ),
