@@ -23,7 +23,11 @@ impl PacketBuilder {
         Self {
             buf: v.raw().to_vec(),
             ipv6: v.is_ipv6(),
-            ip_hdr_len: if v.is_ipv6() { 40 } else { (v.raw()[0] & 0x0f) as usize * 4 },
+            ip_hdr_len: if v.is_ipv6() {
+                40
+            } else {
+                (v.raw()[0] & 0x0f) as usize * 4
+            },
             l4_hdr_start: l4.start,
             is_tcp: v.is_tcp(),
             payload_start: v.payload_offset(),
@@ -65,36 +69,71 @@ impl PacketBuilder {
 
     /// Replace the L4 payload; fixes the IPv4 total-length / IPv6 payload-length
     /// field. TCP/UDP length-derived fields and all checksums are left stale.
-    pub fn replace_payload(&mut self, new_payload: &[u8]) -> &mut Self {
+    ///
+    /// Returns [`CoreError::PacketTooLarge`] if the resulting packet would exceed
+    /// the representable IP length field (`u16`), leaving the builder unchanged.
+    pub fn replace_payload(&mut self, new_payload: &[u8]) -> Result<&mut Self, CoreError> {
+        let new_len = self
+            .payload_start
+            .checked_add(new_payload.len())
+            .ok_or(CoreError::PacketTooLarge)?;
+        Self::validate_ip_len(new_len, self.ipv6)?;
         self.buf.truncate(self.payload_start);
         self.buf.extend_from_slice(new_payload);
-        self.fix_ip_length();
-        self
+        self.write_ip_length(new_len);
+        Ok(self)
     }
 
     /// Keep only the first `keep` payload bytes (fragment part 0).
-    pub fn truncate_payload(&mut self, keep: usize) -> &mut Self {
-        let end = (self.payload_start + keep).min(self.buf.len());
+    pub fn truncate_payload(&mut self, keep: usize) -> Result<&mut Self, CoreError> {
+        let end = self
+            .payload_start
+            .checked_add(keep)
+            .ok_or(CoreError::PacketTooLarge)?
+            .min(self.buf.len());
+        Self::validate_ip_len(end, self.ipv6)?;
         self.buf.truncate(end);
-        self.fix_ip_length();
-        self
+        self.write_ip_length(end);
+        Ok(self)
     }
 
     /// Drop the first `start` payload bytes, keeping the rest (fragment part 1).
     /// The caller is responsible for bumping the TCP sequence number by `start`.
-    pub fn slice_payload_from(&mut self, start: usize) -> &mut Self {
-        let cut = (self.payload_start + start).min(self.buf.len());
+    pub fn slice_payload_from(&mut self, start: usize) -> Result<&mut Self, CoreError> {
+        let cut = self
+            .payload_start
+            .checked_add(start)
+            .ok_or(CoreError::PacketTooLarge)?
+            .min(self.buf.len());
+        let new_len = self
+            .payload_start
+            .checked_add(self.buf.len().saturating_sub(cut))
+            .ok_or(CoreError::PacketTooLarge)?;
+        Self::validate_ip_len(new_len, self.ipv6)?;
         self.buf.drain(self.payload_start..cut);
-        self.fix_ip_length();
-        self
+        debug_assert_eq!(self.buf.len(), new_len);
+        self.write_ip_length(new_len);
+        Ok(self)
     }
 
-    fn fix_ip_length(&mut self) {
+    fn validate_ip_len(len: usize, ipv6: bool) -> Result<(), CoreError> {
+        let field = if ipv6 {
+            len.checked_sub(40).ok_or(CoreError::PacketTooLarge)?
+        } else {
+            len
+        };
+        if field > u16::MAX as usize {
+            return Err(CoreError::PacketTooLarge);
+        }
+        Ok(())
+    }
+
+    fn write_ip_length(&mut self, len: usize) {
         if self.ipv6 {
-            let payload_len = (self.buf.len() - 40) as u16;
+            let payload_len = (len - 40) as u16;
             self.buf[4..6].copy_from_slice(&payload_len.to_be_bytes());
         } else {
-            let total = self.buf.len() as u16;
+            let total = len as u16;
             self.buf[2..4].copy_from_slice(&total.to_be_bytes());
         }
         let _ = self.ip_hdr_len; // reserved for option-aware edits later
@@ -137,14 +176,14 @@ mod tests {
         let v = PacketView::parse(&pkt).unwrap();
 
         let mut b = PacketBuilder::from_view(&v);
-        b.truncate_payload(4);
+        b.truncate_payload(4).unwrap();
         let out = b.into_bytes();
         let v2 = PacketView::parse(&out).unwrap();
         assert_eq!(v2.payload(), b"0123");
         assert_eq!(u16::from_be_bytes([out[2], out[3]]), out.len() as u16);
 
         let mut b = PacketBuilder::from_view(&v);
-        b.replace_payload(b"XYZ");
+        b.replace_payload(b"XYZ").unwrap();
         let out = b.into_bytes();
         let v3 = PacketView::parse(&out).unwrap();
         assert_eq!(v3.payload(), b"XYZ");
@@ -158,11 +197,14 @@ mod tests {
         let seq = v.tcp_seq().unwrap();
 
         let mut s0 = PacketBuilder::from_view(&v);
-        s0.truncate_payload(2);
+        s0.truncate_payload(2).unwrap();
         let s0 = s0.into_bytes();
 
         let mut s1 = PacketBuilder::from_view(&v);
-        s1.slice_payload_from(2).set_tcp_seq(seq.wrapping_add(2)).unwrap();
+        s1.slice_payload_from(2)
+            .unwrap()
+            .set_tcp_seq(seq.wrapping_add(2))
+            .unwrap();
         let s1 = s1.into_bytes();
 
         let p0 = PacketView::parse(&s0).unwrap();
@@ -175,5 +217,50 @@ mod tests {
         assert_eq!(u16::from_be_bytes([s1[2], s1[3]]), s1.len() as u16);
         // Concatenated payloads == original.
         assert_eq!([p0.payload(), p1.payload()].concat(), b"0123456789");
+    }
+
+    #[test]
+    fn replace_payload_rejects_ipv4_total_length_overflow() {
+        let pkt = v4_tcp(b"abc");
+        let v = PacketView::parse(&pkt).unwrap();
+        let mut b = PacketBuilder::from_view(&v);
+        let original = b.as_bytes().to_vec();
+        // Header is 40 bytes; payload making total > u16::MAX must fail.
+        let too_large = vec![0u8; (u16::MAX as usize - 40) + 1];
+        let res = b.replace_payload(&too_large);
+        assert!(matches!(res, Err(CoreError::PacketTooLarge)));
+        assert_eq!(
+            b.as_bytes(),
+            original.as_slice(),
+            "builder unchanged on overflow"
+        );
+    }
+
+    #[test]
+    fn replace_payload_rejects_ipv6_payload_length_overflow() {
+        let mut p = vec![0u8; 40 + 20]; // IPv6 header + TCP header
+        p[0] = 0x60; // IPv6
+        p[6] = 6; // Next Header: TCP
+        p[40] = 0x30;
+        p[41] = 0x39; // src port
+        p[42] = 0x01;
+        p[43] = 0xbb; // dst port
+        p[52] = 0x50; // data offset = 5 words
+        p.extend_from_slice(b"hello");
+        let payload_len = (p.len() - 40) as u16;
+        p[4..6].copy_from_slice(&payload_len.to_be_bytes());
+
+        let v = PacketView::parse(&p).unwrap();
+        assert!(v.is_ipv6());
+        let mut b = PacketBuilder::from_view(&v);
+        let original = b.as_bytes().to_vec();
+        let too_large = vec![0u8; (u16::MAX as usize - 20) + 1]; // IPv6 payload (L4+) > u16::MAX
+        let res = b.replace_payload(&too_large);
+        assert!(matches!(res, Err(CoreError::PacketTooLarge)));
+        assert_eq!(
+            b.as_bytes(),
+            original.as_slice(),
+            "builder unchanged on overflow"
+        );
     }
 }
