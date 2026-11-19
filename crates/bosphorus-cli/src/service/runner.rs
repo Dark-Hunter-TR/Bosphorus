@@ -80,7 +80,14 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
     set_state(ServiceState::StartPending, ServiceControlAccept::empty(), Duration::from_secs(10));
 
     let profile_dir = profile_dir.unwrap_or_else(super::profiles_dir);
-    let _ = std::fs::create_dir_all(&profile_dir);
+    if let Err(e) = std::fs::create_dir_all(&profile_dir) {
+        eventlog::error(
+            eventlog::ID_OPEN_FAILED,
+            &format!("failed to create profile directory {}: {e}", profile_dir.display()),
+        );
+        set_state(ServiceState::Stopped, ServiceControlAccept::empty(), Duration::default());
+        anyhow::bail!("create profile dir {}: {e}", profile_dir.display());
+    }
     let (human, key) = crate::netkey::compute();
 
     let mut cfg = EvasionConfig { enable_overlap_disorder: enable_overlap, quic, ..Default::default() };
