@@ -150,6 +150,9 @@ pub struct Engine {
     /// JSON byte count of the last profile write (0 until the first write, or
     /// in a forced / no-profile run). Read by the `bosphorus::mem` digest.
     last_profile_bytes: AtomicUsize,
+    /// Serializes export+save so an older snapshot cannot finish its write after
+    /// a newer one and overwrite it (G10). Held only for the local file write.
+    persist_write: Mutex<()>,
 
     // --- live network re-keying (only populated by `with_live_netkey`) ---
     /// `None` = no live re-keying; `maybe_rebind` is then a no-op.
@@ -189,6 +192,7 @@ impl Engine {
             mem_at: Mutex::new(now),
             evict_at: Mutex::new(now),
             last_profile_bytes: AtomicUsize::new(0),
+            persist_write: Mutex::new(()),
             netkey_provider: None,
             netkey_dirty: AtomicBool::new(false),
             netkey_changed_at: Mutex::new(now),
@@ -689,11 +693,15 @@ impl Engine {
 
         // 1. flush the old network's learned state to its OWN file.
         if let Some(p) = &old.profile {
+            let _guard = self.persist_write.lock();
             let file = old.discovery.export(&p.net_key);
             match crate::profile::persist::save(&p.dir, &p.net_key, &file) {
-                Ok(n) => self.last_profile_bytes.store(n, Ordering::Relaxed),
+                Ok(n) => {
+                    self.last_profile_bytes.store(n, Ordering::Relaxed);
+                }
                 Err(e) => tracing::warn!(
-                    target: "bosphorus::net", error = %e,
+                    target: "bosphorus::net",
+                    error = %e,
                     "old-profile flush failed on rebind"
                 ),
             }
@@ -811,17 +819,22 @@ impl Engine {
     }
 
     fn write_profile(&self, discovery: &Discovery, p: &ProfilePaths) {
+        let _guard = self.persist_write.lock();
         let file = discovery.export(&p.net_key);
         match crate::profile::persist::save(&p.dir, &p.net_key, &file) {
             Ok(n) => {
                 self.last_profile_bytes.store(n, Ordering::Relaxed);
                 tracing::debug!(
                     target: "bosphorus::discovery",
-                    targets = file.targets.len(), bytes = n, "discovery profile saved"
+                    targets = file.targets.len(),
+                    bytes = n,
+                    "discovery profile saved"
                 )
             }
             Err(e) => tracing::warn!(
-                target: "bosphorus::discovery", error = %e, "discovery profile save failed"
+                target: "bosphorus::discovery",
+                error = %e,
+                "discovery profile save failed"
             ),
         }
     }
