@@ -1,6 +1,6 @@
 //! `bosphorus service run` — the SCM entry point. Not for interactive use.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -298,8 +298,12 @@ mod tests {
 
     #[test]
     fn pos_value_returns_following_token_or_none() {
-        let s = vec!["--a".to_string(), "1".to_string(), "--b".to_string()];
-        assert_eq!(pos_value(&s, "--a"), Some("1"));
+        let s = vec![
+            OsString::from("--a"),
+            OsString::from("1"),
+            OsString::from("--b"),
+        ];
+        assert_eq!(pos_value(&s, "--a"), Some(OsStr::new("1")));
         assert_eq!(pos_value(&s, "--b"), None); // last token, nothing after
         assert_eq!(pos_value(&s, "--c"), None); // absent
     }
