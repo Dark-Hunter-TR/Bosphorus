@@ -296,27 +296,29 @@ impl Engine {
         let key = FlowKey::from_five_tuple(&ft, meta.outbound);
 
         // --- connection tracking / verdict ---
-        let verdict = self.flows.with_mut(key, now, |st| {
-            if meta.outbound {
-                conntrack::observe_outbound(st, &view, now, &self.cfg.conntrack)
-            } else {
-                conntrack::observe_inbound(st, &view, now, &self.cfg.conntrack)
-            }
-        });
+        let (verdict, verdict_snapshot) = self.flows.with_mut_snapshot(
+            key,
+            now,
+            |st| {
+                if meta.outbound {
+                    conntrack::observe_outbound(st, &view, now, &self.cfg.conntrack)
+                } else {
+                    conntrack::observe_inbound(st, &view, now, &self.cfg.conntrack)
+                }
+            },
+            |st| {
+                (
+                    st.server_name.clone(),
+                    st.trial,
+                    st.target_key.clone(),
+                    st.client_hello_at,
+                    st.client_hello_retx,
+                    st.injector_hops,
+                )
+            },
+        );
         if let Some(outcome) = verdict {
-            let (name, trial, target, ch_at, retx, injector_hops) = self
-                .flows
-                .peek(&key, |st| {
-                    (
-                        st.server_name.clone(),
-                        st.trial,
-                        st.target_key.clone(),
-                        st.client_hello_at,
-                        st.client_hello_retx,
-                        st.injector_hops,
-                    )
-                })
-                .unwrap_or((None, None, None, None, 0, None));
+            let (name, trial, target, ch_at, retx, injector_hops) = verdict_snapshot;
             let timing = VerdictTiming {
                 latency: ch_at.map(|t| now.saturating_duration_since(t)),
                 retx,
@@ -353,14 +355,19 @@ impl Engine {
         out: &mut SendBatch,
         now: Instant,
     ) -> Decision {
-        // Retransmit-aware: a strategy was already emitted for this flow's
-        // ClientHello. A later ClientHello can only be a retransmit — pass it
-        // through unchanged so it isn't re-desynced (avoids amplification).
-        if self
+        // Retransmit-aware + flow context in one lock acquisition.
+        let (strategy_applied, hops, cached_target, remote_initial_ttl) = self
             .flows
-            .peek(key, |st| st.strategy_applied)
-            .unwrap_or(false)
-        {
+            .peek(key, |st| {
+                (
+                    st.strategy_applied,
+                    st.hops_to_server,
+                    st.target_key.clone(),
+                    st.remote_initial_ttl,
+                )
+            })
+            .unwrap_or((false, None, None, None));
+        if strategy_applied {
             tracing::debug!(
                 target: "bosphorus::strategy",
                 server_ip = %key.server_ip, client_port = key.client_port,
@@ -368,8 +375,6 @@ impl Engine {
             );
             return Decision::ForwardOriginal;
         }
-
-        let hops = self.flows.peek(key, |st| st.hops_to_server).flatten();
 
         // Which strategy? forced override, or ask discovery.
         let (target, strat, trial, discovered_ttl): (
@@ -396,9 +401,7 @@ impl Engine {
                 // no readable SNI is NOT registered as an IP-keyed target and is
                 // NOT mutated — it either reuses a target already learned for
                 // this exact flow, or it passes through untouched.
-                let target = match sni_target(view.payload())
-                    .or_else(|| self.flows.peek(key, |st| st.target_key.clone()).flatten())
-                {
+                let target = match sni_target(view.payload()).or(cached_target) {
                     Some(t) => t,
                     None => {
                         tracing::debug!(
@@ -409,8 +412,7 @@ impl Engine {
                         return Decision::ForwardOriginal;
                     }
                 };
-                let server_ttl = self.flows.peek(key, |st| st.remote_initial_ttl).flatten();
-                let a = discovery.assign(&target, server_ttl);
+                let a = discovery.assign(&target, remote_initial_ttl);
                 (
                     target,
                     a.strategy,
