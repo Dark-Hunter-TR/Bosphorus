@@ -28,14 +28,28 @@ fn main() {
         return;
     };
     let deps_dir = profile_dir.join("deps");
-    let _ = fs::create_dir_all(&deps_dir);
+    if let Err(e) = fs::create_dir_all(&deps_dir) {
+        println!(
+            "cargo:warning=could not create deps staging dir {}: {e}",
+            deps_dir.display()
+        );
+        // continue: copying next to the main binary can still help `cargo run`
+    }
 
     for name in ["WinDivert.dll", "WinDivert64.sys"] {
         let from = src.join(name);
         if let Err(e) = fs::copy(&from, profile_dir.join(name)) {
-            println!("cargo:warning=could not stage {name} from {}: {e}", from.display());
+            println!(
+                "cargo:warning=could not stage {name} from {}: {e}",
+                from.display()
+            );
         }
         // best-effort: lets `cargo test` / `cargo run --example` load the dll
-        let _ = fs::copy(&from, deps_dir.join(name));
+        if let Err(e) = fs::copy(&from, deps_dir.join(name)) {
+            println!(
+                "cargo:warning=could not stage {name} into deps dir {}: {e}",
+                deps_dir.display()
+            );
+        }
     }
 }
