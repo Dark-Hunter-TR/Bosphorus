@@ -318,11 +318,7 @@ pub fn show_uninstall_result(res: &anyhow::Result<()>) {
 /// (the engine's live log).
 fn elevate(args: Vec<OsString>, hidden: bool) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let params = args
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let params = shell_parameters(&args);
     let exe_w = wide(&exe.to_string_lossy());
     let params_w = wide(&params);
     let show = if hidden { SW_HIDE } else { SW_SHOWNORMAL };
@@ -352,6 +348,48 @@ fn elevate(args: Vec<OsString>, hidden: bool) -> anyhow::Result<()> {
         println!("{}", i18n::launcher_elevate_cancelled());
         pause();
         Ok(())
+    }
+}
+
+/// Encode argv for ShellExecuteW's lpParameters using Windows command-line quoting.
+fn shell_parameters(args: &[OsString]) -> String {
+    args.iter()
+        .map(|a| quote_shell_arg(&a.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_shell_arg(arg: &str) -> String {
+    if arg.is_empty() || arg.chars().any(|c| c.is_whitespace() || c == '"') {
+        let mut out = String::with_capacity(arg.len() + 2);
+        out.push('"');
+        let mut bs = 0usize;
+        for ch in arg.chars() {
+            match ch {
+                '\\' => bs += 1,
+                '"' => {
+                    for _ in 0..(bs * 2 + 1) {
+                        out.push('\\');
+                    }
+                    out.push('"');
+                    bs = 0;
+                }
+                _ => {
+                    for _ in 0..bs {
+                        out.push('\\');
+                    }
+                    out.push(ch);
+                    bs = 0;
+                }
+            }
+        }
+        for _ in 0..(bs * 2) {
+            out.push('\\');
+        }
+        out.push('"');
+        out
+    } else {
+        arg.to_string()
     }
 }
 
@@ -977,5 +1015,28 @@ mod tests {
 
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_dir(&d);
+    }
+
+    #[test]
+    fn shell_parameters_quote_args_for_windows() {
+        assert_eq!(
+            shell_parameters(&elevated_install_args(Lang::En)),
+            "service install --lang en --from-launcher"
+        );
+        assert_eq!(
+            shell_parameters(&[
+                OsString::from("--profile-dir"),
+                OsString::from("C:\\Program Files\\Bosphorus"),
+            ]),
+            "--profile-dir \"C:\\Program Files\\Bosphorus\""
+        );
+        assert_eq!(
+            shell_parameters(&[OsString::from("say"), OsString::from("he said \"hi\"")]),
+            "say \"he said \\\"hi\\\"\""
+        );
+        assert_eq!(
+            shell_parameters(&[OsString::from("C:\\dir\\")]),
+            "\"C:\\dir\\\\\""
+        );
     }
 }
