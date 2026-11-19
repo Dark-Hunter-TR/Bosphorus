@@ -18,6 +18,16 @@ use crate::profile::persist::{atomic_write, read_bounded, sanitize, MAX_PROFILE_
 use crate::profile::{ScoredStrategy, SeedTier, StrategyQuality};
 use crate::strategy::{Strategy, StrategyId};
 
+fn isp_hash(isp: &str) -> u64 {
+    // FNV-1a 64-bit; keeps distinct labels from colliding when `sanitize` folds them.
+    let mut h = 0xcbf29ce484222325u64;
+    for b in isp.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// On-disk format version for the ISP pool file. Independent of the discovery
 /// profile's `PROFILE_VERSION`.
 pub const ISP_POOL_VERSION: u32 = 1;
@@ -92,19 +102,29 @@ impl IspPool {
         }
     }
 
-    /// `<dir>/isp/<sanitized-isp>.json`.
+    /// `<dir>/isp/<sanitized-isp>-<hash>.json`.
     pub fn path(dir: &Path, isp: &str) -> PathBuf {
+        dir.join("isp")
+            .join(format!("{}-{:016x}.json", sanitize(isp), isp_hash(isp)))
+    }
+
+    fn legacy_path(dir: &Path, isp: &str) -> PathBuf {
         dir.join("isp").join(format!("{}.json", sanitize(isp)))
     }
 
     /// Read the pool for `isp`. `None` if it does not exist, is too large, cannot be
     /// parsed, or is a version we do not understand (all treated as "start cold").
     pub fn load(dir: &Path, isp: &str) -> Option<Self> {
-        let bytes = read_bounded(&Self::path(dir, isp), MAX_PROFILE_JSON_BYTES).ok()?;
-        match serde_json::from_slice::<IspPool>(&bytes) {
-            Ok(p) if p.version == ISP_POOL_VERSION => Some(p),
-            _ => None,
+        for path in [Self::path(dir, isp), Self::legacy_path(dir, isp)] {
+            let Ok(bytes) = read_bounded(&path, MAX_PROFILE_JSON_BYTES) else {
+                continue;
+            };
+            return match serde_json::from_slice::<IspPool>(&bytes) {
+                Ok(p) if p.version == ISP_POOL_VERSION => Some(p),
+                _ => None,
+            };
         }
+        None
     }
 
     /// Atomic write (per-process staging file + last-writer-wins rename — see
@@ -386,5 +406,47 @@ mod tests {
         pool.merge_session("netA", &[], 4);
         assert!(pool.entries.iter().all(|e| e.strategy.id() != b.id()));
         assert_eq!(pool.entries.len(), 1);
+    }
+
+    #[test]
+    fn distinct_labels_that_sanitized_equal_use_separate_pools() {
+        let g = gen();
+        let a = g.all()[0].clone();
+        let b = g.all()[1].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut p1 = IspPool::new("ISP A");
+        let mut p2 = IspPool::new("ISP_A");
+        p1.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3))], 1);
+        p1.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3))], 2);
+        p2.merge_session("n1", &[(b.id(), score(b.clone(), 4, 3))], 1);
+        p2.merge_session("n2", &[(b.id(), score(b.clone(), 4, 3))], 2);
+        assert_ne!(
+            IspPool::path(dir.path(), "ISP A"),
+            IspPool::path(dir.path(), "ISP_A")
+        );
+        p1.save(dir.path()).unwrap();
+        p2.save(dir.path()).unwrap();
+
+        let l1 = IspPool::load(dir.path(), "ISP A").unwrap();
+        let l2 = IspPool::load(dir.path(), "ISP_A").unwrap();
+        assert_eq!(l1.seeds(), vec![(a.id(), SeedTier::IspPool)]);
+        assert_eq!(l2.seeds(), vec![(b.id(), SeedTier::IspPool)]);
+    }
+
+    #[test]
+    fn load_reads_legacy_sanitized_filename() {
+        let g = gen();
+        let a = g.all()[0].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pool = IspPool::new("Acme ISP");
+        pool.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3))], 1);
+        pool.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3))], 2);
+        let json = serde_json::to_vec_pretty(&pool).unwrap();
+        let legacy = IspPool::legacy_path(dir.path(), "Acme ISP");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, json).unwrap();
+
+        let back = IspPool::load(dir.path(), "Acme ISP").unwrap();
+        assert_eq!(back.seeds(), vec![(a.id(), SeedTier::IspPool)]);
     }
 }
