@@ -1,9 +1,9 @@
 //! Per-target discovery state. M6: in-memory only. M8 adds serde + a disk store
 //! keyed by network fingerprint.
 
-mod score;
 pub mod isp;
 pub mod persist;
+mod score;
 
 pub use isp::IspPool;
 pub use score::{ScoredStrategy, StrategyQuality};
@@ -35,7 +35,11 @@ pub struct VerdictTiming {
 
 impl VerdictTiming {
     /// No timing information (synthetic verdict / test).
-    pub const NONE: Self = Self { latency: None, retx: 0, injector_hops: None };
+    pub const NONE: Self = Self {
+        latency: None,
+        retx: 0,
+        injector_hops: None,
+    };
 }
 
 /// Where a target is in the discovery lifecycle.
@@ -75,10 +79,6 @@ pub enum SeedTier {
     /// The most common `active` strategy across every `Active` target in the
     /// session ("house strategy"). Domain-independent but a strong prior.
     HouseStrategy,
-    /// Reserved: a co-located `Active` target (same resolved IP block). Not yet
-    /// wired — it needs the server IP plumbed into `assign` — so nothing
-    /// constructs this variant today.
-    IpProximity,
     /// A strategy that other **networks of the same ISP** (manual `--isp`
     /// label) settled on. A cross-network prior, not same-network proof —
     /// weaker than everything above it, so it only reorders the grid sweep.
@@ -91,21 +91,19 @@ impl SeedTier {
     ///
     /// `DomainSibling` / `HouseStrategy` promote on the **first** success: the
     /// strategy is already proven on the same network, and a wrong seed
-    /// self-corrects via `demote_after_failure`. `IpProximity` / `IspPool` are
-    /// weaker (a locality guess / a cross-network prior), so they keep the
-    /// default threshold.
+    /// self-corrects via `demote_after_failure`. `IspPool` is weaker (a
+    /// cross-network prior), so it keeps the default threshold.
     pub fn promote_threshold(self, default: u8) -> u8 {
         match self {
             SeedTier::DomainSibling | SeedTier::HouseStrategy => 1,
-            SeedTier::IpProximity | SeedTier::IspPool => default,
+            SeedTier::IspPool => default,
         }
     }
 
     /// Tiers confident enough to skip the naked `Probe` on a fresh target: the
     /// strategy is already proven on the same network, so the odds this host is
-    /// blocked the same way are very high. `IpProximity` is only a locality
-    /// guess and `IspPool` only a cross-network prior, so they still earn their
-    /// Probe.
+    /// blocked the same way are very high. `IspPool` is only a cross-network
+    /// prior, so it still earns its Probe.
     pub fn is_high_confidence(self) -> bool {
         matches!(self, SeedTier::DomainSibling | SeedTier::HouseStrategy)
     }
@@ -323,7 +321,11 @@ mod tests {
 
         ts.expire_in_flight(later, Duration::from_secs(15));
         let live: Vec<_> = ts.in_flight.iter().map(|f| f.id).collect();
-        assert_eq!(live, vec![id(2)], "the 20s-old entry is gone, the fresh one stays");
+        assert_eq!(
+            live,
+            vec![id(2)],
+            "the 20s-old entry is gone, the fresh one stays"
+        );
     }
 
     #[test]
@@ -334,6 +336,9 @@ mod tests {
         ts.mark_assigned(Some(id(1)), now);
         ts.mark_assigned(Some(id(2)), now);
         ts.clear_in_flight(id(1));
-        assert_eq!(ts.in_flight.iter().map(|f| f.id).collect::<Vec<_>>(), vec![id(2)]);
+        assert_eq!(
+            ts.in_flight.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![id(2)]
+        );
     }
 }

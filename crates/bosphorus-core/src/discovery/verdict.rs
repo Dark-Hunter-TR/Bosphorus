@@ -18,15 +18,6 @@ pub fn is_failure(o: FlowOutcome) -> bool {
     )
 }
 
-/// +1 success, -1 failure, 0 for `Inconclusive`.
-pub fn score_delta(o: FlowOutcome) -> i32 {
-    match o {
-        FlowOutcome::Success => 1,
-        FlowOutcome::Inconclusive => 0,
-        _ => -1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,11 +32,8 @@ mod tests {
             FlowOutcome::TlsError,
         ] {
             assert!(is_failure(o));
-            assert_eq!(score_delta(o), -1);
         }
         assert!(!is_success(FlowOutcome::Inconclusive));
         assert!(!is_failure(FlowOutcome::Inconclusive));
-        assert_eq!(score_delta(FlowOutcome::Success), 1);
-        assert_eq!(score_delta(FlowOutcome::Inconclusive), 0);
     }
 }
