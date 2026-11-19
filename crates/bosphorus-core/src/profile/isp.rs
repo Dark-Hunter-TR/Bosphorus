@@ -121,6 +121,10 @@ impl IspPool {
     /// `networks` never inflates. `promoted` is `(id, its score)` for every
     /// `Active`-with-strategy target — see [`Discovery::promoted_for_isp`].
     ///
+    /// The session is authoritative for `net_key`: contributions for strategies
+    /// no longer promoted (dropped/failed) are removed so stale evidence does
+    /// not accumulate indefinitely.
+    ///
     /// [`Discovery::promoted_for_isp`]: crate::discovery::Discovery::promoted_for_isp
     pub fn merge_session(
         &mut self,
@@ -139,6 +143,12 @@ impl IspPool {
             e.2 += sc.successes as u64;
             e.3 += 1;
             e.4.merge(&sc.quality);
+        }
+
+        // Replace this network's evidence wholesale: drop contributions for
+        // strategies this session no longer promotes instead of keeping them forever.
+        for entry in &mut self.entries {
+            entry.contributions.retain(|c| c.net_key != net_key);
         }
 
         for (id, (strategy, trials, successes, targets, quality)) in by_id {
@@ -160,8 +170,6 @@ impl IspPool {
                     self.entries.last_mut().unwrap()
                 }
             };
-            // Replace this network's prior contribution, if any.
-            entry.contributions.retain(|c| c.net_key != net_key);
             entry.contributions.push(contrib);
             if entry.contributions.len() > MAX_CONTRIBUTIONS {
                 entry
@@ -170,6 +178,8 @@ impl IspPool {
                 entry.contributions.truncate(MAX_CONTRIBUTIONS);
             }
         }
+
+        self.entries.retain(|e| !e.contributions.is_empty());
     }
 
     /// The seed list this pool contributes to a fresh `Discover` target: every
@@ -243,14 +253,22 @@ mod tests {
         let (a, b, c) = (g.all()[0].clone(), g.all()[1].clone(), g.all()[2].clone());
         let mut pool = IspPool::new("acme");
 
-        // a: only one network -> excluded no matter how good.
-        pool.merge_session("net1", &[(a.id(), score(a.clone(), 10, 10))], 1);
-        // b: two networks but ratio 4/10 = 0.4 -> excluded.
-        pool.merge_session("net1", &[(b.id(), score(b.clone(), 5, 2))], 1);
-        pool.merge_session("net2", &[(b.id(), score(b.clone(), 5, 2))], 1);
-        // c: two networks, ratio 7/10 = 0.7 -> included.
-        pool.merge_session("net1", &[(c.id(), score(c.clone(), 5, 4))], 1);
-        pool.merge_session("net2", &[(c.id(), score(c.clone(), 5, 3))], 1);
+        // merge_session is authoritative for a network's current promoted set.
+        // a: only net1 -> excluded. b: net1,net2 ratio 4/10 -> excluded. c: net1,net2 ratio 7/10.
+        pool.merge_session(
+            "net1",
+            &[
+                (a.id(), score(a.clone(), 10, 10)),
+                (b.id(), score(b.clone(), 5, 2)),
+                (c.id(), score(c.clone(), 5, 4)),
+            ],
+            1,
+        );
+        pool.merge_session(
+            "net2",
+            &[(b.id(), score(b.clone(), 5, 2)), (c.id(), score(c.clone(), 5, 3))],
+            1,
+        );
 
         let seeds = pool.seeds();
         assert_eq!(seeds, vec![(c.id(), SeedTier::IspPool)]);
@@ -262,12 +280,9 @@ mod tests {
         let (a, b) = (g.all()[0].clone(), g.all()[1].clone());
         let mut pool = IspPool::new("acme");
         // b on 3 networks, a on 2 — both pass the ratio gate.
-        for n in ["n1", "n2"] {
-            pool.merge_session(n, &[(a.id(), score(a.clone(), 4, 3))], 1);
-        }
-        for n in ["n1", "n2", "n3"] {
-            pool.merge_session(n, &[(b.id(), score(b.clone(), 4, 3))], 1);
-        }
+        pool.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))], 1);
+        pool.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))], 1);
+        pool.merge_session("n3", &[(b.id(), score(b.clone(), 4, 3))], 1);
         assert_eq!(
             pool.seeds(),
             vec![(b.id(), SeedTier::IspPool), (a.id(), SeedTier::IspPool)],
@@ -344,5 +359,32 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, vec![b'x'; (MAX_PROFILE_JSON_BYTES as usize) + 1]).unwrap();
         assert!(IspPool::load(dir.path(), "acme").is_none());
+    }
+
+    #[test]
+    fn dropped_strategy_evidence_is_pruned_on_merge() {
+        let g = gen();
+        let (a, b) = (g.all()[0].clone(), g.all()[1].clone());
+        let mut pool = IspPool::new("acme");
+        pool.merge_session("netB", &[(a.id(), score(a.clone(), 4, 3))], 1);
+        pool.merge_session(
+            "netA",
+            &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))],
+            2,
+        );
+        // netA drops a (failed/not promoted) but keeps b; netB's evidence for a remains.
+        pool.merge_session("netA", &[(b.id(), score(b.clone(), 5, 4))], 3);
+        let ea = pool.entries.iter().find(|e| e.strategy.id() == a.id()).unwrap();
+        assert_eq!(ea.contributions.len(), 1, "only netB remains for dropped strategy");
+        assert_eq!(ea.contributions[0].net_key, "netB");
+        let eb = pool.entries.iter().find(|e| e.strategy.id() == b.id()).unwrap();
+        assert_eq!(eb.contributions.len(), 1);
+        let (t, s, _) = eb.totals();
+        assert_eq!((t, s), (5, 4));
+
+        // netA drops everything: its b contribution and the now-empty b entry go away.
+        pool.merge_session("netA", &[], 4);
+        assert!(pool.entries.iter().all(|e| e.strategy.id() != b.id()));
+        assert_eq!(pool.entries.len(), 1);
     }
 }
