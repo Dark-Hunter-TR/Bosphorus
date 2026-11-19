@@ -96,10 +96,16 @@ fn build_session(
     cfg: &EvasionConfig,
     profile: Option<ProfilePaths>,
     net_human: Option<String>,
+    adopt_on_drift: bool,
 ) -> NetworkSession {
     let discovery = Discovery::new(cfg);
     if let Some(p) = &profile {
-        match crate::profile::persist::load(&p.dir, &p.net_key) {
+        let loaded = if adopt_on_drift {
+            crate::profile::persist::load(&p.dir, &p.net_key)
+        } else {
+            crate::profile::persist::load_exact(&p.dir, &p.net_key)
+        };
+        match loaded {
             Some(file) => {
                 let grew = file.grid_signature != discovery.grid_signature();
                 let (restored, degraded) = discovery.load_persisted(&file);
@@ -162,7 +168,7 @@ impl Engine {
         let flows = FlowTable::new(cfg.conntrack.idle_timeout);
         // Initial session from the configured profile (discovery runs only; the
         // CLI passes `profile: None` for forced `--strategy` runs).
-        let session = build_session(&cfg, cfg.profile.clone(), None);
+        let session = build_session(&cfg, cfg.profile.clone(), None, true);
 
         let now = Instant::now();
         Self {
@@ -644,7 +650,10 @@ impl Engine {
             (k, Some(dir)) => Some(ProfilePaths { dir, net_key: k.to_string() }),
         };
 
-        let session = build_session(&self.cfg, profile, Some(new_human.to_string()));
+        // A live rebind is a *network switch*: load only this key's own file.
+        // NetKey-drift adoption is for startup recovery, not for rebind —
+        // adopting here would bleed one network's learned targets into another.
+        let session = build_session(&self.cfg, profile, Some(new_human.to_string()), false);
         let restored = session.discovery.target_count();
         // The ISP pool is ISP-scoped, not network-scoped — carry it across.
         if let Some(pool) = self.isp_pool.get() {
@@ -1406,6 +1415,39 @@ mod tests {
         assert!(
             crate::profile::persist::profile_path(dir.path(), "keyA").exists(),
             "old network's learned state flushed to its own file on the way out"
+        );
+    }
+
+    /// B17: startup recovers learned state after a NetKey drift (the file under
+    /// the new key is absent), while the rebind tests above keep network
+    /// isolation strict.
+    #[test]
+    fn startup_adopts_orphaned_profile_on_netkey_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_old = EvasionConfig {
+            profile: Some(crate::config::ProfilePaths {
+                dir: dir.path().to_path_buf(),
+                net_key: "oldkey".into(),
+            }),
+            ..Default::default()
+        };
+        let old = Engine::new(cfg_old);
+        old.process(&mut ch_with_sni("learned.example", 54001), &mut out_meta(), &mut SendBatch::new());
+        old.process(&mut inbound_rst(54001), &mut in_meta(), &mut SendBatch::new());
+        old.persist_now();
+        assert!(crate::profile::persist::profile_path(dir.path(), "oldkey").exists());
+
+        let cfg_new = EvasionConfig {
+            profile: Some(crate::config::ProfilePaths {
+                dir: dir.path().to_path_buf(),
+                net_key: "newkey".into(),
+            }),
+            ..Default::default()
+        };
+        let fresh = Engine::new(cfg_new);
+        assert!(
+            fresh.discovery_summary().iter().any(|t| t.key == "learned.example"),
+            "startup adopts the orphaned profile after NetKey drift"
         );
     }
 
