@@ -105,7 +105,8 @@ narrow slice of traffic (filter fragments taken verbatim from GoodbyeDPI):
   header).
 - **Inbound** from a configured TLS port that carries a verdict signal: the `SYN`+`ACK`
   (its TTL tells us the server's stack and hop count), a `RST`, or the first
-  data segment starting with `0x16` (a `ServerHello`).
+  byte of a TLS record conntrack reads (`0x16` handshake, `0x17` app data,
+  `0x15` alert).
 - Loopback and private/link-local address ranges are excluded on both sides.
 
 Everything else on the machine is untouched. Non-IP and non-TCP packets pass
