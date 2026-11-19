@@ -47,7 +47,7 @@ fn is_default_service_path(path: &Path) -> bool {
 #[cfg(windows)]
 fn harden_dir(dir: &Path) -> std::io::Result<()> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOL, HLOCAL};
+    use windows::Win32::Foundation::HLOCAL;
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
