@@ -67,7 +67,9 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
         opts.force,
     )?;
 
+    let data_dir = super::data_dir();
     let profile_dir = opts.profile_dir.clone().unwrap_or_else(super::profiles_dir);
+    std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&profile_dir)?;
     std::fs::create_dir_all(super::logs_dir())?;
     // G14/B5: when using the default %ProgramData% tree, restrict ACLs so

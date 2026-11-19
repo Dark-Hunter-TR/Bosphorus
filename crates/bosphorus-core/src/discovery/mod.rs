@@ -242,7 +242,7 @@ impl Discovery {
         if let Some(tier) = a.seed_tier {
             tracing::debug!(
                 target: "bosphorus::discovery",
-                server = %target, ?tier,
+                server = %redacted_target(target), ?tier,
                 strategy = a.strategy.as_ref().map(|s| s.describe()),
                 "seeded candidate offered (out of grid order)"
             );
@@ -250,17 +250,17 @@ impl Discovery {
         match &a.event {
             Some(DiscoveryEvent::Exhausted { tried }) => tracing::warn!(
                 target: "bosphorus::discovery",
-                server = %target, tried, phase = ?ts.phase,
+                server = %redacted_target(target), tried, phase = ?ts.phase,
                 "grid EXHAUSTED on assign — no strategy bypassed this target"
             ),
             Some(DiscoveryEvent::Revived { new_total, untried }) => tracing::info!(
                 target: "bosphorus::discovery",
-                server = %target, new_total, untried,
+                server = %redacted_target(target), new_total, untried,
                 "exhausted target revived — live grid grew past the swept size"
             ),
             Some(DiscoveryEvent::ProbeSkipped { via }) => tracing::info!(
                 target: "bosphorus::discovery",
-                server = %target, ?via,
+                server = %redacted_target(target), ?via,
                 strategy = a.strategy.as_ref().map(|s| s.describe()),
                 "probe skipped — high-confidence sibling seed applied on first contact"
             ),
@@ -1494,5 +1494,25 @@ mod tests {
         assert_eq!(promoted.len(), 1, "only the Active-with-strategy target");
         assert_eq!(promoted[0].0, id1);
         assert!(promoted[0].1.successes >= 2);
+    }
+}
+
+fn redacted_target(target: &str) -> String {
+    // B5: avoid leaking visited hostnames/SNI in discovery logs.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in target.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("host#{h:016x}")
+}
+
+#[cfg(test)]
+mod b5_redaction_tests {
+    #[test]
+    fn redacted_target_hides_hostname() {
+        let a = super::redacted_target("updates.discord.com");
+        assert!(!a.contains("discord"));
+        assert!(a.starts_with("host#"));
     }
 }
