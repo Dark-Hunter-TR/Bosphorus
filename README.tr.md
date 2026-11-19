@@ -106,7 +106,8 @@ trafik dilimini yakalar (filtre parçaları GoodbyeDPI'dan bire bir alınmışt�
   kayıt başlığı).
 - 443 portundan gelen ve bir karar sinyali taşıyan **gelen** trafik: `SYN`+`ACK`
   (TTL'i sunucunun yığınını ve atlama sayısını söyler), bir `RST`, ya da
-  `0x16` ile başlayan ilk veri segmenti (bir `ServerHello`).
+  conntrack'in okuduğu ilk TLS kayıt baytı (`0x16` handshake, `0x17` uygulama
+  verisi, `0x15` alert).
 - Loopback ve özel/link-local adres aralıkları her iki yönde de dışlanır.
 
 Makinedeki diğer her şeye dokunulmaz. IP olmayan ve TCP olmayan paketler
