@@ -62,7 +62,10 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     }
 
     let exe = resolve_exe(opts)?;
-    preflight_windivert(opts.force)?;
+    preflight_windivert(
+        exe.parent().unwrap_or_else(|| std::path::Path::new(".")),
+        opts.force,
+    )?;
 
     let profile_dir = opts.profile_dir.clone().unwrap_or_else(super::profiles_dir);
     std::fs::create_dir_all(&profile_dir)?;
@@ -1003,11 +1006,22 @@ fn verify_windivert_collateral_in_dir_with_expected(
 
 /// Try to load the WinDivert driver right here. If it fails now, the SYSTEM
 /// service would fail the same way at boot with no visible error.
-fn preflight_windivert(force: bool) -> anyhow::Result<()> {
+///
+/// B7: run the open in the same directory context the installed service will use
+/// (where the service exe and verified WinDivert collateral live) so WinDivert's
+/// colocated DLL/driver lookup matches the installed artifacts, not the installer's
+/// current process directory.
+fn preflight_windivert(collateral_dir: &std::path::Path, force: bool) -> anyhow::Result<()> {
     // A filter that matches ~nothing — exercises driver load without touching
     // real traffic.
     let filter = CString::new("tcp.DstPort == 65535 and tcp.SrcPort == 65534").unwrap();
-    match WinDivertHandle::open(&filter, Layer::Network, 0, OpenFlags::new()) {
+    let prev_cwd = std::env::current_dir().ok();
+    let _ = std::env::set_current_dir(collateral_dir);
+    let res = WinDivertHandle::open(&filter, Layer::Network, 0, OpenFlags::new());
+    if let Some(prev) = prev_cwd {
+        let _ = std::env::set_current_dir(prev);
+    }
+    match res {
         Ok(h) => {
             drop(h);
             Ok(())
@@ -1017,13 +1031,20 @@ fn preflight_windivert(force: bool) -> anyhow::Result<()> {
             Ok(())
         }
         Err(DivertError::Open(e)) => {
-            anyhow::bail!("{}", crate::i18n::preflight_fail(&e.to_string()))
+            anyhow::bail!(
+                "{} (checked in service/install directory: {})",
+                crate::i18n::preflight_fail(&e.to_string()),
+                collateral_dir.display()
+            )
         }
         Err(e) if force => {
             eprintln!("pre-flight: {e} (--force)");
             Ok(())
         }
-        Err(e) => anyhow::bail!("pre-flight WinDivertOpen: {e}"),
+        Err(e) => anyhow::bail!(
+            "pre-flight WinDivertOpen: {e} (checked in service/install directory: {})",
+            collateral_dir.display()
+        ),
     }
 }
 
