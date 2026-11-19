@@ -474,6 +474,7 @@ fn is_trusted_install_owner_sid(owner_sid: &str) -> bool {
 /// (`OWNER_SECURITY_INFORMATION`, `SE_FILE_OBJECT`) and compares the owner SID against the
 /// trusted set above. On non-Windows platforms the owner cannot be verified, so this
 /// returns an explicit error (Windows runtime behavior is SUSPECTED/unverified here).
+#[allow(dead_code)] // exercised only by the non-Windows test
 fn validate_service_install_directory_owner(
     install_dir: &std::path::Path,
     explicit_install_dir: bool,
@@ -504,6 +505,7 @@ fn validate_service_install_directory_owner(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)] // used by validate_service_install_directory_owner on non-Windows only
 fn owner_verification_error(
     install_dir: &std::path::Path,
     explicit_install_dir: bool,
@@ -530,6 +532,7 @@ fn owner_verification_error(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)] // used by validate_service_install_directory_owner on non-Windows only
 fn untrusted_owner_message(
     install_dir: &std::path::Path,
     explicit_install_dir: bool,
@@ -561,11 +564,12 @@ fn query_directory_owner_sid(path: &std::path::Path) -> anyhow::Result<String> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{LocalFree, HLOCAL, WIN32_ERROR};
+    use windows::Win32::Foundation::{HLOCAL, PSID, WIN32_ERROR};
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
-    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+    use windows::Win32::System::Memory::LocalFree;
 
     let wide: Vec<u16> = path
         .as_os_str()
@@ -586,7 +590,7 @@ fn query_directory_owner_sid(path: &std::path::Path) -> anyhow::Result<String> {
             None,
             None,
             None,
-            Some(&mut sd),
+            &mut sd,
         )
     };
     if status != WIN32_ERROR(0) {
@@ -611,7 +615,7 @@ fn query_directory_owner_sid(path: &std::path::Path) -> anyhow::Result<String> {
             }
         }
     }
-    let _sd_guard = LocalAllocGuard(HLOCAL(sd.0));
+    let _sd_guard = LocalAllocGuard(HLOCAL(sd.0 as _));
 
     if owner_sid.is_invalid() {
         anyhow::bail!("security descriptor does not contain an owner SID");
