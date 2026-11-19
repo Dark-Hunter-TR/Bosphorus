@@ -360,7 +360,9 @@ fn shell_parameters(args: &[OsString]) -> String {
 }
 
 fn quote_shell_arg(arg: &str) -> String {
-    if arg.is_empty() || arg.chars().any(|c| c.is_whitespace() || c == '"') {
+    // A trailing backslash is special too: inside quotes it must be doubled so
+    // it cannot escape the closing quote when the CRT parses lpParameters.
+    if arg.is_empty() || arg.ends_with('\\') || arg.chars().any(|c| c.is_whitespace() || c == '"') {
         let mut out = String::with_capacity(arg.len() + 2);
         out.push('"');
         let mut bs = 0usize;
