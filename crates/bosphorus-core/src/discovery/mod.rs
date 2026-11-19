@@ -35,7 +35,9 @@ impl Discovery {
     pub fn new(cfg: &EvasionConfig) -> Self {
         Self {
             generator: DefaultGenerator::new(cfg),
-            scheduler: Scheduler { tuning: cfg.discovery.clone() },
+            scheduler: Scheduler {
+                tuning: cfg.discovery.clone(),
+            },
             targets: Mutex::new(HashMap::new()),
             isp_pool: OnceLock::new(),
         }
@@ -124,8 +126,7 @@ impl Discovery {
     /// only the learned server TTL. Returns `(restored, degraded)` counts.
     pub fn load_persisted(&self, file: &ProfileFile) -> (usize, usize) {
         let now = Instant::now();
-        let live: HashSet<StrategyId> =
-            self.generator.all().iter().map(|s| s.id()).collect();
+        let live: HashSet<StrategyId> = self.generator.all().iter().map(|s| s.id()).collect();
         let (mut restored, mut degraded) = (0usize, 0usize);
         let mut map = self.targets.lock();
 
@@ -244,7 +245,7 @@ impl Discovery {
         if let Some(tier) = a.seed_tier {
             tracing::debug!(
                 target: "bosphorus::discovery",
-                server = %target, ?tier,
+                server = %redacted_target(target), ?tier,
                 strategy = a.strategy.as_ref().map(|s| s.describe()),
                 "seeded candidate offered (out of grid order)"
             );
@@ -252,17 +253,17 @@ impl Discovery {
         match &a.event {
             Some(DiscoveryEvent::Exhausted { tried }) => tracing::warn!(
                 target: "bosphorus::discovery",
-                server = %target, tried, phase = ?ts.phase,
+                server = %redacted_target(target), tried, phase = ?ts.phase,
                 "grid EXHAUSTED on assign — no strategy bypassed this target"
             ),
             Some(DiscoveryEvent::Revived { new_total, untried }) => tracing::info!(
                 target: "bosphorus::discovery",
-                server = %target, new_total, untried,
+                server = %redacted_target(target), new_total, untried,
                 "exhausted target revived — live grid grew past the swept size"
             ),
             Some(DiscoveryEvent::ProbeSkipped { via }) => tracing::info!(
                 target: "bosphorus::discovery",
-                server = %target, ?via,
+                server = %redacted_target(target), ?via,
                 strategy = a.strategy.as_ref().map(|s| s.describe()),
                 "probe skipped — high-confidence sibling seed applied on first contact"
             ),
@@ -338,7 +339,9 @@ impl Discovery {
                 tried: ts.tried.len(),
                 total,
                 in_flight: ts.in_flight.len(),
-                last_trial_age: ts.last_assigned_at.map(|t| now.saturating_duration_since(t)),
+                last_trial_age: ts
+                    .last_assigned_at
+                    .map(|t| now.saturating_duration_since(t)),
                 from_disk: ts.from_disk,
                 active: ts
                     .active
@@ -364,7 +367,9 @@ impl Discovery {
 
 /// Most recent activity of any kind on a target (assignment or verdict).
 fn last_activity(ts: &TargetState) -> Instant {
-    ts.last_assigned_at.unwrap_or(ts.created_at).max(ts.updated_at)
+    ts.last_assigned_at
+        .unwrap_or(ts.created_at)
+        .max(ts.updated_at)
 }
 
 /// Crude registered domain (eTLD+1) — no Public Suffix List. Keeps the last two
@@ -380,7 +385,11 @@ fn registered_domain(host: &str) -> &str {
     const SLD: &[&str] = &["co", "com", "net", "org", "gov", "edu", "ac"];
     let last = labels[labels.len() - 1];
     let penult = labels[labels.len() - 2];
-    let take = if last.len() == 2 && SLD.contains(&penult) { 3 } else { 2 };
+    let take = if last.len() == 2 && SLD.contains(&penult) {
+        3
+    } else {
+        2
+    };
     let start = labels.len() - take;
     let byte_off: usize = labels[..start].iter().map(|l| l.len() + 1).sum();
     &host[byte_off..]
@@ -390,12 +399,14 @@ fn registered_domain(host: &str) -> &str {
 /// first, then lowest observed latency. Used to break ties in the seed list.
 fn better_seed(a: &StrategyQuality, b: &StrategyQuality) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    b.looks_fast().cmp(&a.looks_fast()).then_with(|| match (a.min_latency, b.min_latency) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    })
+    b.looks_fast()
+        .cmp(&a.looks_fast())
+        .then_with(|| match (a.min_latency, b.min_latency) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        })
 }
 
 /// Build the seed list for a `Discover` target from what already works on this
@@ -409,16 +420,16 @@ fn better_seed(a: &StrategyQuality, b: &StrategyQuality) -> std::cmp::Ordering {
 ///
 /// Ids are deduped across layers (first tier wins). Empty when there is nothing
 /// `Active` to learn from.
-fn build_seeds(
-    map: &HashMap<String, TargetState>,
-    target: &str,
-) -> Vec<(StrategyId, SeedTier)> {
+fn build_seeds(map: &HashMap<String, TargetState>, target: &str) -> Vec<(StrategyId, SeedTier)> {
     let reg = registered_domain(target);
     let mut out: Vec<(StrategyId, SeedTier)> = Vec::new();
     let mut seen: HashSet<StrategyId> = HashSet::new();
 
     let quality_of = |ts: &TargetState, id: StrategyId| -> StrategyQuality {
-        ts.scores.get(&id).map(|s| s.quality.clone()).unwrap_or_default()
+        ts.scores
+            .get(&id)
+            .map(|s| s.quality.clone())
+            .unwrap_or_default()
     };
 
     // --- 1. domain-sibling promoted strategies ---
@@ -450,7 +461,11 @@ fn build_seeds(
         e.0 += 1;
     }
     let mut house: Vec<(StrategyId, (u32, StrategyQuality))> = freq.into_iter().collect();
-    house.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| better_seed(&a.1 .1, &b.1 .1)));
+    house.sort_by(|a, b| {
+        b.1 .0
+            .cmp(&a.1 .0)
+            .then_with(|| better_seed(&a.1 .1, &b.1 .1))
+    });
     for (id, _) in house.into_iter().take(3) {
         if seen.insert(id) {
             out.push((id, SeedTier::HouseStrategy));
@@ -533,7 +548,10 @@ mod tests {
     /// `n` single-split candidates: `frag@<off>`, wrong-seq.
     fn tiny_gen(offsets: &[u16]) -> DefaultGenerator {
         DefaultGenerator::with_axes(&GridAxes {
-            frag_anchor: offsets.iter().map(|o| Some(SplitAnchor::AbsoluteOffset(*o))).collect(),
+            frag_anchor: offsets
+                .iter()
+                .map(|o| Some(SplitAnchor::AbsoluteOffset(*o)))
+                .collect(),
             frag_reverse: vec![false],
             desync: vec![DesyncKind::WrongSeq],
             repeats: vec![1],
@@ -612,7 +630,10 @@ mod tests {
 
         let working = file.targets.iter().find(|t| t.key == w).unwrap();
         assert_eq!(working.phase, NetPhase::Active);
-        assert!(working.active.is_some(), "the promoted strategy is persisted");
+        assert!(
+            working.active.is_some(),
+            "the promoted strategy is persisted"
+        );
 
         // Round-trips cleanly: reload restores exactly the two kept targets.
         let d2 = Discovery::new(&EvasionConfig::default());
@@ -631,8 +652,16 @@ mod tests {
         a.record(t, None, FlowOutcome::DpiReset); // -> Discover
 
         let x = a.assign(t, Some(128));
-        let fast = VerdictTiming { latency: Some(Duration::from_millis(180)), retx: 0, injector_hops: None };
-        let faster = VerdictTiming { latency: Some(Duration::from_millis(150)), retx: 0, injector_hops: None };
+        let fast = VerdictTiming {
+            latency: Some(Duration::from_millis(180)),
+            retx: 0,
+            injector_hops: None,
+        };
+        let faster = VerdictTiming {
+            latency: Some(Duration::from_millis(150)),
+            retx: 0,
+            injector_hops: None,
+        };
         a.record_timed(t, x.id, FlowOutcome::Success, fast);
         a.record_timed(t, x.id, FlowOutcome::Success, faster); // 2nd success -> promoted
 
@@ -671,10 +700,20 @@ mod tests {
             t,
             x.id,
             FlowOutcome::Success,
-            VerdictTiming { latency: Some(Duration::from_millis(1300)), retx: 1, injector_hops: None },
+            VerdictTiming {
+                latency: Some(Duration::from_millis(1300)),
+                retx: 1,
+                injector_hops: None,
+            },
         );
         let m = a.targets.lock();
-        let q = &m.get(t).unwrap().scores.get(&x.id.unwrap()).unwrap().quality;
+        let q = &m
+            .get(t)
+            .unwrap()
+            .scores
+            .get(&x.id.unwrap())
+            .unwrap()
+            .quality;
         assert_eq!(q.slow_successes, 1);
         assert_eq!(q.retx_free_successes, 0);
         assert!(!q.looks_fast());
@@ -696,7 +735,11 @@ mod tests {
             t,
             probe.id,
             FlowOutcome::DpiReset,
-            VerdictTiming { latency: None, retx: 0, injector_hops: Some(4) },
+            VerdictTiming {
+                latency: None,
+                retx: 0,
+                injector_hops: Some(4),
+            },
         );
 
         let next = a.assign(t, None);
@@ -708,16 +751,27 @@ mod tests {
             t,
             next.id,
             FlowOutcome::DpiReset,
-            VerdictTiming { latency: None, retx: 0, injector_hops: Some(9) },
+            VerdictTiming {
+                latency: None,
+                retx: 0,
+                injector_hops: Some(9),
+            },
         );
-        assert_eq!(a.assign(t, None).discovered_ttl, Some(4), "first measurement wins");
+        assert_eq!(
+            a.assign(t, None).discovered_ttl,
+            Some(4),
+            "first measurement wins"
+        );
     }
 
     // --- Phase 2: sibling / house-strategy seeding ---
 
     #[test]
     fn registered_domain_crude_etld_plus_one() {
-        assert_eq!(registered_domain("gateway-us-east1-c.discord.gg"), "discord.gg");
+        assert_eq!(
+            registered_domain("gateway-us-east1-c.discord.gg"),
+            "discord.gg"
+        );
         assert_eq!(registered_domain("cdn.discordapp.com"), "discordapp.com");
         assert_eq!(registered_domain("updates.discord.com"), "discord.com");
         assert_eq!(registered_domain("discord.com"), "discord.com");
@@ -743,7 +797,11 @@ mod tests {
 
         for i in 0..6 {
             let a = disc.assign(t, None);
-            assert_eq!(a.id, Some(g.all()[i].id()), "candidate {i} follows grid order");
+            assert_eq!(
+                a.id,
+                Some(g.all()[i].id()),
+                "candidate {i} follows grid order"
+            );
             assert_eq!(a.seed_tier, None, "no seed offered with nothing Active");
             disc.record(t, a.id, FlowOutcome::DpiReset);
         }
@@ -761,7 +819,10 @@ mod tests {
         disc.assign(t, None);
         disc.record(t, None, FlowOutcome::DpiReset);
         let a = disc.assign(t, None);
-        assert_eq!(a.seed_tier, None, "an Active-passthrough sibling has no strategy to seed");
+        assert_eq!(
+            a.seed_tier, None,
+            "an Active-passthrough sibling has no strategy to seed"
+        );
     }
 
     #[test]
@@ -789,16 +850,28 @@ mod tests {
         // not grid[0].
         let fresh = "status.discord.com";
         let a = disc.assign(fresh, None);
-        assert_eq!(a.id, Some(id1), "domain-sibling strategy seeded ahead of the grid");
+        assert_eq!(
+            a.id,
+            Some(id1),
+            "domain-sibling strategy seeded ahead of the grid"
+        );
         assert_eq!(a.seed_tier, Some(SeedTier::DomainSibling));
-        assert_eq!(disc.target_phase(fresh), Some(NetPhase::Discover), "no naked Probe");
+        assert_eq!(
+            disc.target_phase(fresh),
+            Some(NetPhase::Discover),
+            "no naked Probe"
+        );
 
         // #4: a domain-sibling seed promotes on its FIRST success.
         let (ev, phase) = disc.record(fresh, Some(id1), FlowOutcome::Success).unwrap();
         assert!(
             matches!(
                 ev,
-                DiscoveryEvent::Promoted { via_seed: Some(SeedTier::DomainSibling), after: 1, .. }
+                DiscoveryEvent::Promoted {
+                    via_seed: Some(SeedTier::DomainSibling),
+                    after: 1,
+                    ..
+                }
             ),
             "got {ev:?}"
         );
@@ -937,7 +1010,11 @@ mod tests {
         // Session 2: reload under a 3-candidate grid (ids of 2 & 3 unchanged).
         let s2 = Discovery::with_generator(tiny_gen(&[2, 3, 4]), tuning);
         let (restored, degraded) = s2.load_persisted(&file);
-        assert_eq!((restored, degraded), (1, 0), "ids still valid -> full restore");
+        assert_eq!(
+            (restored, degraded),
+            (1, 0),
+            "ids still valid -> full restore"
+        );
 
         // First assignment revives it.
         let a = s2.assign(t, None);
@@ -997,7 +1074,10 @@ mod tests {
     #[test]
     fn evict_enforces_the_hard_cap_worst_first() {
         let cfg = EvasionConfig {
-            discovery: crate::config::DiscoveryTuning { max_targets: 3, ..Default::default() },
+            discovery: crate::config::DiscoveryTuning {
+                max_targets: 3,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let disc = Discovery::new(&cfg);
@@ -1108,7 +1188,10 @@ mod tests {
     fn windows_server_never_gets_an_overlap_candidate() {
         use crate::strategy::generator::is_overlap_family;
         // Overlap opted in — otherwise there is nothing to gate.
-        let cfg = EvasionConfig { enable_overlap_disorder: true, ..Default::default() };
+        let cfg = EvasionConfig {
+            enable_overlap_disorder: true,
+            ..Default::default()
+        };
         let disc = Discovery::new(&cfg);
         let t = "win.example";
 
@@ -1133,7 +1216,10 @@ mod tests {
             }
         }
         assert!(saw_any, "at least the non-overlap grid was swept");
-        assert!(!saw_overlap, "Windows server must never be assigned an overlap-family strategy");
+        assert!(
+            !saw_overlap,
+            "Windows server must never be assigned an overlap-family strategy"
+        );
 
         // The same target on a unix server (TTL 64) *would* see overlap candidates.
         let disc2 = Discovery::new(&cfg);
@@ -1152,7 +1238,10 @@ mod tests {
                 None => break,
             }
         }
-        assert!(saw_overlap_unix, "unix server sweeps overlap candidates too");
+        assert!(
+            saw_overlap_unix,
+            "unix server sweeps overlap candidates too"
+        );
     }
 
     // ---- C: ISP seed pool ------------------------------------------------- #
@@ -1176,7 +1265,10 @@ mod tests {
         // Fresh target, nothing Active on this network: the ISP-pool candidate is
         // the only seed, and it must NOT skip the naked Probe.
         let a = disc.assign("fresh.example", None);
-        assert!(a.id.is_none() && a.event.is_none(), "naked Probe still runs");
+        assert!(
+            a.id.is_none() && a.event.is_none(),
+            "naked Probe still runs"
+        );
         assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Probe));
 
         // Probe fails -> Discover -> ISP-pool strategy offered ahead of grid[0].
@@ -1187,7 +1279,9 @@ mod tests {
 
         // One success is not enough — IspPool keeps the default threshold (2),
         // unlike DomainSibling / HouseStrategy.
-        let (ev, _) = disc.record("fresh.example", Some(id5), FlowOutcome::Success).unwrap();
+        let (ev, _) = disc
+            .record("fresh.example", Some(id5), FlowOutcome::Success)
+            .unwrap();
         assert!(matches!(ev, DiscoveryEvent::Noted), "got {ev:?}");
         assert_eq!(disc.target_phase("fresh.example"), Some(NetPhase::Discover));
     }
@@ -1233,5 +1327,25 @@ mod tests {
         assert_eq!(promoted.len(), 1, "only the Active-with-strategy target");
         assert_eq!(promoted[0].0, id1);
         assert!(promoted[0].1.successes >= 2);
+    }
+}
+
+fn redacted_target(target: &str) -> String {
+    // B5: avoid leaking visited hostnames/SNI in discovery logs.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in target.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("host#{h:016x}")
+}
+
+#[cfg(test)]
+mod b5_redaction_tests {
+    #[test]
+    fn redacted_target_hides_hostname() {
+        let a = super::redacted_target("updates.discord.com");
+        assert!(!a.contains("discord"));
+        assert!(a.starts_with("host#"));
     }
 }
