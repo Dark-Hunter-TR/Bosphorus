@@ -637,6 +637,6 @@ Get-ChildItem "$env:ProgramData\Bosphorus\profiles\*.json" | Select Name, LastWr
 
 ## Лицензия
 
-Двойная лицензия **MIT OR Apache-2.0**, на ваш выбор (как объявлено в
-`Cargo.toml`). WinDivert распространяется на собственных условиях — см.
+Лицензия **Apache-2.0** (см. `LICENSE`; как указано в `Cargo.toml`). WinDivert
+распространяется на собственных условиях — см.
 `assets/WinDivert-2.2.2-A/LICENSE`.
