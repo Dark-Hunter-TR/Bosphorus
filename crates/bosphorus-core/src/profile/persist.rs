@@ -11,7 +11,7 @@
 //! (the grid was renumbered), the per-strategy data is dropped and only the
 //! learned server TTL is kept.
 
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,9 @@ use crate::strategy::{Strategy, StrategyId};
 /// so an older file that still carries it loads without complaint (the value is
 /// discarded — the success streak is now per-candidate and not persisted).
 pub const PROFILE_VERSION: u32 = 1;
+
+/// Cap JSON reads to avoid unbounded memory/CPU use on hostile or corrupted files (G21).
+pub(crate) const MAX_PROFILE_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistedScore {
@@ -68,14 +71,25 @@ pub struct ProfileFile {
 
 impl ProfileFile {
     pub fn new(grid_signature: u64, net_key: &str, targets: Vec<PersistedTarget>) -> Self {
-        Self { version: PROFILE_VERSION, grid_signature, net_key: net_key.to_owned(), targets }
+        Self {
+            version: PROFILE_VERSION,
+            grid_signature,
+            net_key: net_key.to_owned(),
+            targets,
+        }
     }
 }
 
 pub(crate) fn sanitize(net_key: &str) -> String {
     net_key
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -105,14 +119,34 @@ fn atomic_write_with_tag(path: &Path, bytes: &[u8], tag: &str) -> io::Result<()>
     Ok(())
 }
 
-/// Read `<dir>/<net_key>.json`. `None` if it does not exist or cannot be
-/// parsed (a corrupt file is treated as "start fresh").
+/// Read `<dir>/<net_key>.json`. `None` if it does not exist, is too large, or
+/// cannot be parsed (a bad file is treated as "start fresh").
 pub fn load(dir: &Path, net_key: &str) -> Option<ProfileFile> {
-    let bytes = std::fs::read(profile_path(dir, net_key)).ok()?;
+    let bytes = read_bounded(&profile_path(dir, net_key), MAX_PROFILE_JSON_BYTES).ok()?;
     match serde_json::from_slice::<ProfileFile>(&bytes) {
         Ok(f) if f.version == PROFILE_VERSION => Some(f),
         _ => None,
     }
+}
+
+pub(crate) fn read_bounded(path: &Path, max: u64) -> io::Result<Vec<u8>> {
+    let len = std::fs::metadata(path)?.len();
+    if len > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON exceeds size limit",
+        ));
+    }
+    let f = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(len as usize);
+    f.take(max + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JSON exceeds size limit",
+        ));
+    }
+    Ok(buf)
 }
 
 /// Atomic write (see [`atomic_write`]): a per-process staging file then a
@@ -179,7 +213,10 @@ mod tests {
         assert_eq!(back.targets[0].injector_hops, Some(4));
         assert_eq!(back.grid_signature, 0xdead_beef);
         // No stray temp file left behind.
-        assert!(!tmp_files(dir.path()).iter().any(|_| true), "left a .tmp file");
+        assert!(
+            !tmp_files(dir.path()).iter().any(|_| true),
+            "left a .tmp file"
+        );
     }
 
     #[test]
@@ -196,7 +233,8 @@ mod tests {
             "server_initial_ttl": null,
             "grid_size_at_exhaustion": null
         }"#;
-        let pt: PersistedTarget = serde_json::from_str(json).expect("old-format target still loads");
+        let pt: PersistedTarget =
+            serde_json::from_str(json).expect("old-format target still loads");
         assert_eq!(pt.injector_hops, None);
     }
 
@@ -231,8 +269,15 @@ mod tests {
         let json = serde_json::to_vec_pretty(&sample()).unwrap();
         atomic_write_with_tag(&path, &json, "p2").unwrap();
 
-        assert_eq!(std::fs::read(&p1_tmp).unwrap(), b"P1-STAGED-BYTES", "P1's temp was clobbered");
-        assert!(load(dir.path(), key).is_some(), "P2's save produced a valid store");
+        assert_eq!(
+            std::fs::read(&p1_tmp).unwrap(),
+            b"P1-STAGED-BYTES",
+            "P1's temp was clobbered"
+        );
+        assert!(
+            load(dir.path(), key).is_some(),
+            "P2's save produced a valid store"
+        );
         // P2 cleaned up after itself; only P1's staging file remains.
         assert_eq!(tmp_files(dir.path()), vec!["net.json.p1.tmp".to_string()]);
     }
@@ -254,5 +299,16 @@ mod tests {
         assert_eq!(back.targets.len(), 1);
         assert_eq!(back.targets[0].key, "b.example", "last writer wins");
         assert!(tmp_files(dir.path()).is_empty(), "no temp litter");
+    }
+
+    #[test]
+    fn oversized_profile_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            profile_path(dir.path(), "k"),
+            vec![b'x'; (MAX_PROFILE_JSON_BYTES as usize) + 1],
+        )
+        .unwrap();
+        assert!(load(dir.path(), "k").is_none());
     }
 }
