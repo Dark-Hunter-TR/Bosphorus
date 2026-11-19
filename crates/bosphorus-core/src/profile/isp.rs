@@ -18,6 +18,16 @@ use crate::profile::persist::{atomic_write, sanitize};
 use crate::profile::{ScoredStrategy, SeedTier, StrategyQuality};
 use crate::strategy::{Strategy, StrategyId};
 
+fn isp_hash(isp: &str) -> u64 {
+    // FNV-1a 64-bit; keeps distinct labels from colliding when `sanitize` folds them.
+    let mut h = 0xcbf29ce484222325u64;
+    for b in isp.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// On-disk format version for the ISP pool file. Independent of the discovery
 /// profile's `PROFILE_VERSION`.
 pub const ISP_POOL_VERSION: u32 = 1;
@@ -85,22 +95,36 @@ pub struct IspPool {
 
 impl IspPool {
     pub fn new(isp: &str) -> Self {
-        Self { version: ISP_POOL_VERSION, isp: isp.to_owned(), entries: Vec::new() }
+        Self {
+            version: ISP_POOL_VERSION,
+            isp: isp.to_owned(),
+            entries: Vec::new(),
+        }
     }
 
-    /// `<dir>/isp/<sanitized-isp>.json`.
+    /// `<dir>/isp/<sanitized-isp>-<hash>.json`.
     pub fn path(dir: &Path, isp: &str) -> PathBuf {
+        dir.join("isp")
+            .join(format!("{}-{:016x}.json", sanitize(isp), isp_hash(isp)))
+    }
+
+    fn legacy_path(dir: &Path, isp: &str) -> PathBuf {
         dir.join("isp").join(format!("{}.json", sanitize(isp)))
     }
 
     /// Read the pool for `isp`. `None` if it does not exist, cannot be parsed, or
     /// is a version we do not understand (all treated as "start cold").
     pub fn load(dir: &Path, isp: &str) -> Option<Self> {
-        let bytes = std::fs::read(Self::path(dir, isp)).ok()?;
-        match serde_json::from_slice::<IspPool>(&bytes) {
-            Ok(p) if p.version == ISP_POOL_VERSION => Some(p),
-            _ => None,
+        for path in [Self::path(dir, isp), Self::legacy_path(dir, isp)] {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            return match serde_json::from_slice::<IspPool>(&bytes) {
+                Ok(p) if p.version == ISP_POOL_VERSION => Some(p),
+                _ => None,
+            };
         }
+        None
     }
 
     /// Atomic write (per-process staging file + last-writer-wins rename — see
@@ -128,9 +152,9 @@ impl IspPool {
         let mut by_id: HashMap<StrategyId, (Strategy, u64, u64, u32, StrategyQuality)> =
             HashMap::new();
         for (id, sc) in promoted {
-            let e = by_id.entry(*id).or_insert_with(|| {
-                (sc.strategy.clone(), 0, 0, 0, StrategyQuality::default())
-            });
+            let e = by_id
+                .entry(*id)
+                .or_insert_with(|| (sc.strategy.clone(), 0, 0, 0, StrategyQuality::default()));
             e.1 += sc.trials as u64;
             e.2 += sc.successes as u64;
             e.3 += 1;
@@ -149,7 +173,10 @@ impl IspPool {
             let entry = match self.entries.iter_mut().find(|e| e.strategy.id() == id) {
                 Some(e) => e,
                 None => {
-                    self.entries.push(IspPoolEntry { strategy, contributions: Vec::new() });
+                    self.entries.push(IspPoolEntry {
+                        strategy,
+                        contributions: Vec::new(),
+                    });
                     self.entries.last_mut().unwrap()
                 }
             };
@@ -157,7 +184,9 @@ impl IspPool {
             entry.contributions.retain(|c| c.net_key != net_key);
             entry.contributions.push(contrib);
             if entry.contributions.len() > MAX_CONTRIBUTIONS {
-                entry.contributions.sort_by_key(|c| std::cmp::Reverse(c.last_seen));
+                entry
+                    .contributions
+                    .sort_by_key(|c| std::cmp::Reverse(c.last_seen));
                 entry.contributions.truncate(MAX_CONTRIBUTIONS);
             }
         }
@@ -187,15 +216,18 @@ impl IspPool {
                     (None, None) => std::cmp::Ordering::Equal,
                 })
         });
-        ranked.into_iter().map(|(e, ..)| (e.strategy.id(), SeedTier::IspPool)).collect()
+        ranked
+            .into_iter()
+            .map(|(e, ..)| (e.strategy.id(), SeedTier::IspPool))
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strategy::DefaultGenerator;
     use crate::config::EvasionConfig;
+    use crate::strategy::DefaultGenerator;
 
     fn gen() -> DefaultGenerator {
         DefaultGenerator::new(&EvasionConfig::default())
@@ -215,7 +247,11 @@ mod tests {
         pool.merge_session("netA", &[(s0.id(), score(s0.clone(), 3, 2))], 100);
         pool.merge_session("netA", &[(s0.id(), score(s0.clone(), 9, 8))], 200);
         assert_eq!(pool.entries.len(), 1);
-        assert_eq!(pool.entries[0].contributions.len(), 1, "same network -> one contribution");
+        assert_eq!(
+            pool.entries[0].contributions.len(),
+            1,
+            "same network -> one contribution"
+        );
         // The later run's counts replaced the earlier ones.
         let (t, s, _) = pool.entries[0].totals();
         assert_eq!((t, s), (9, 8));
@@ -268,7 +304,12 @@ mod tests {
             pool.merge_session(&format!("net{i}"), &[(a.id(), score(a.clone(), 2, 2))], i);
         }
         assert_eq!(pool.entries[0].contributions.len(), MAX_CONTRIBUTIONS);
-        let oldest = pool.entries[0].contributions.iter().map(|c| c.last_seen).min().unwrap();
+        let oldest = pool.entries[0]
+            .contributions
+            .iter()
+            .map(|c| c.last_seen)
+            .min()
+            .unwrap();
         assert_eq!(oldest, 5, "the 5 oldest contributions were dropped");
     }
 
@@ -305,7 +346,56 @@ mod tests {
 
     #[test]
     fn isp_pool_tier_is_weak_default_threshold_and_never_skips_the_probe() {
-        assert_eq!(SeedTier::IspPool.promote_threshold(2), 2, "no 1-success shortcut");
-        assert!(!SeedTier::IspPool.is_high_confidence(), "must not trigger Probe-skip");
+        assert_eq!(
+            SeedTier::IspPool.promote_threshold(2),
+            2,
+            "no 1-success shortcut"
+        );
+        assert!(
+            !SeedTier::IspPool.is_high_confidence(),
+            "must not trigger Probe-skip"
+        );
+    }
+
+    #[test]
+    fn distinct_labels_that_sanitized_equal_use_separate_pools() {
+        let g = gen();
+        let a = g.all()[0].clone();
+        let b = g.all()[1].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut p1 = IspPool::new("ISP A");
+        let mut p2 = IspPool::new("ISP_A");
+        p1.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3))], 1);
+        p1.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3))], 2);
+        p2.merge_session("n1", &[(b.id(), score(b.clone(), 4, 3))], 1);
+        p2.merge_session("n2", &[(b.id(), score(b.clone(), 4, 3))], 2);
+        assert_ne!(
+            IspPool::path(dir.path(), "ISP A"),
+            IspPool::path(dir.path(), "ISP_A")
+        );
+        p1.save(dir.path()).unwrap();
+        p2.save(dir.path()).unwrap();
+
+        let l1 = IspPool::load(dir.path(), "ISP A").unwrap();
+        let l2 = IspPool::load(dir.path(), "ISP_A").unwrap();
+        assert_eq!(l1.seeds(), vec![(a.id(), SeedTier::IspPool)]);
+        assert_eq!(l2.seeds(), vec![(b.id(), SeedTier::IspPool)]);
+    }
+
+    #[test]
+    fn load_reads_legacy_sanitized_filename() {
+        let g = gen();
+        let a = g.all()[0].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pool = IspPool::new("Acme ISP");
+        pool.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3))], 1);
+        pool.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3))], 2);
+        let json = serde_json::to_vec_pretty(&pool).unwrap();
+        let legacy = IspPool::legacy_path(dir.path(), "Acme ISP");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, json).unwrap();
+
+        let back = IspPool::load(dir.path(), "Acme ISP").unwrap();
+        assert_eq!(back.seeds(), vec![(a.id(), SeedTier::IspPool)]);
     }
 }
