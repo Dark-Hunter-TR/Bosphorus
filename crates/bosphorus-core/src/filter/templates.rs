@@ -16,10 +16,14 @@ pub const NO_LOCALNETS_V6_DST: &str = "((ipv6.DstAddr > ::1) and (ipv6.DstAddr <
 
 pub const NO_LOCALNETS_V6_SRC: &str = "((ipv6.SrcAddr > ::1) and (ipv6.SrcAddr < 2001::0 or ipv6.SrcAddr > 2001:1::0) and (ipv6.SrcAddr < fc00::0 or ipv6.SrcAddr > fe00::0) and (ipv6.SrcAddr < fe80::0 or ipv6.SrcAddr > fec0::0) and (ipv6.SrcAddr < ff00::0 or ipv6.SrcAddr > ffff::0))";
 
-/// `FILTER_PASSIVE_BLOCK_QUIC` (goodbyedpi.c:82-84) — verbatim. Used only for
+/// Ours, not GoodbyeDPI's: the drop clause for
 /// [`QuicPolicy::All`](crate::config::QuicPolicy::All), where the handle drops
 /// every match in the driver and the engine never sees the packets.
-pub const QUIC_DROP: &str = "outbound and !impostor and !loopback and udp and udp.DstPort == 443 and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0xC0 and udp.Payload32[1b] == 0x01";
+///
+/// Like [`QUIC_SELECTIVE_FMT`] it stays version-agnostic (v1, v2, drafts) and
+/// covers every configured TLS port; only the scope — blanket, not per
+/// destination — differs.
+pub const QUIC_DROP_FMT: &str = "(outbound and !impostor and !loopback and udp and {dst_ports} and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0xC0 and ({v4dst} or {v6dst}))";
 
 /// Ours, not GoodbyeDPI's: the capture clause for
 /// [`QuicPolicy::Blocked`](crate::config::QuicPolicy::Blocked), where the drop

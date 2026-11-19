@@ -73,7 +73,15 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
 
     let main = CString::new(main).map_err(|_| CoreError::Filter("main filter has interior NUL".into()))?;
     let quic_drop = if cfg.quic.wants_blanket_drop() {
-        Some(CString::new(t::QUIC_DROP).map_err(|_| CoreError::Filter("quic filter has interior NUL".into()))?)
+        Some(
+            CString::new(
+                t::QUIC_DROP_FMT
+                    .replace("{dst_ports}", &port_clause(ports, "udp.DstPort"))
+                    .replace("{v4dst}", t::NO_LOCALNETS_V4_DST)
+                    .replace("{v6dst}", t::NO_LOCALNETS_V6_DST),
+            )
+            .map_err(|_| CoreError::Filter("quic filter has interior NUL".into()))?,
+        )
     } else {
         None
     };
@@ -136,7 +144,17 @@ mod tests {
         let cfg = EvasionConfig { quic: QuicPolicy::All, ..Default::default() };
         let f = build(&cfg).unwrap();
         assert!(!f.main.to_str().unwrap().contains("udp"));
-        assert_eq!(f.quic_drop.unwrap().into_string().unwrap(), t::QUIC_DROP);
+        let drop = f.quic_drop.unwrap().into_string().unwrap();
+        assert!(drop.contains("udp.Payload[0] >= 0xC0"));
+        assert!(drop.contains("udp.PayloadLength >= 1200"));
+        assert!(
+            !drop.contains("udp.Payload32[1b]"),
+            "the version pin would miss QUIC v2 and the drafts"
+        );
+        for p in [443u16, 2053, 2083, 2087, 2096, 8443] {
+            assert!(drop.contains(&format!("udp.DstPort == {p}")), "blanket drop missing {p}: {drop}");
+        }
+        assert_eq!(count(&drop, '('), count(&drop, ')'));
     }
 
     #[test]
