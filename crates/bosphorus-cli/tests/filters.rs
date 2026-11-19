@@ -18,7 +18,10 @@ fn default_filters_compile() {
 #[test]
 fn every_quic_policy_produces_filters_windivert_accepts() {
     for policy in [QuicPolicy::Off, QuicPolicy::Blocked, QuicPolicy::All] {
-        let cfg = EvasionConfig { quic: policy, ..Default::default() };
+        let cfg = EvasionConfig {
+            quic: policy,
+            ..Default::default()
+        };
         let f = filter::build(&cfg).expect("build");
         compile_filter(&f.main, Layer::Network)
             .unwrap_or_else(|e| panic!("main filter for {policy:?} rejected: {e:?}"));
@@ -38,10 +41,17 @@ fn the_selective_quic_clause_is_present_and_version_agnostic() {
     assert!(s.contains("udp.DstPort == 443"), "no QUIC capture: {s}");
     assert!(s.contains("udp.PayloadLength >= 1200"));
     assert!(
+        s.contains("udp.Payload[0] >= 0x80"),
+        "must capture greased long headers: {s}"
+    );
+    assert!(
         !s.contains("udp.Payload32[1b]"),
         "pinning the version would miss QUIC v2 and the drafts"
     );
-    assert!(f.quic_drop.is_none(), "selective mode must not also blanket-drop");
+    assert!(
+        f.quic_drop.is_none(),
+        "selective mode must not also blanket-drop"
+    );
 }
 
 #[test]
@@ -74,8 +84,14 @@ fn default_filter_carries_the_cloudflare_https_alt_ports_and_compiles() {
     let f = filter::build(&EvasionConfig::default()).expect("build");
     let s = f.main.to_str().unwrap();
     for p in ["443", "2053", "2083", "2087", "2096", "8443"] {
-        assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}");
-        assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}");
+        assert!(
+            s.contains(&format!("tcp.DstPort == {p}")),
+            "outbound missing {p}"
+        );
+        assert!(
+            s.contains(&format!("tcp.SrcPort == {p}")),
+            "inbound missing {p}"
+        );
     }
     compile_filter(&f.main, Layer::Network).expect("alt-port main filter accepted by WinDivert");
 }

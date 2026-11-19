@@ -140,12 +140,29 @@ mod tests {
             .unwrap();
         assert!(s.contains("udp.DstPort == 443"));
         assert!(s.contains("udp.PayloadLength >= 1200"));
-        assert!(s.contains("udp.Payload[0] >= 0xC0"));
+        assert!(s.contains("udp.Payload[0] >= 0x80"));
         assert!(
             !s.contains("udp.Payload32[1b]"),
             "the version pin would miss QUIC v2 and the drafts"
         );
         assert_eq!(count(&s, '('), count(&s, ')'));
+    }
+
+    #[test]
+    fn selective_quic_clause_captures_greased_initials() {
+        let s = build(&EvasionConfig::default())
+            .unwrap()
+            .main
+            .into_string()
+            .unwrap();
+        assert!(
+            s.contains("udp.Payload[0] >= 0x80"),
+            "a greased fixed bit (0x80-0xBF long header) must still reach the engine: {s}"
+        );
+        assert!(
+            !s.contains("udp.Payload[0] >= 0xC0"),
+            "the fixed-bit requirement would miss greased Initials: {s}"
+        );
     }
 
     #[test]
