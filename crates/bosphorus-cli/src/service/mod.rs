@@ -62,7 +62,7 @@ pub(crate) fn harden_service_dir(path: &std::path::Path) -> std::io::Result<()> 
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{BOOL, HLOCAL};
+        use windows::Win32::Foundation::HLOCAL;
         use windows::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
             SE_FILE_OBJECT,
