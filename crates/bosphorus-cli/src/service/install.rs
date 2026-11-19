@@ -96,7 +96,10 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     let svc = mgr
         .create_service(
             &info,
-            ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+            ServiceAccess::CHANGE_CONFIG
+                | ServiceAccess::START
+                | ServiceAccess::QUERY_STATUS
+                | ServiceAccess::DELETE,
         )
         .map_err(super::map_scm_err)?;
 
@@ -126,7 +129,19 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     });
     let _ = svc.set_failure_actions_on_non_crash_failures(true);
 
-    svc.start::<&OsStr>(&[]).map_err(super::map_scm_err)?;
+    if let Err(e) = svc.start::<&OsStr>(&[]) {
+        let start_err = super::map_scm_err(e);
+        // B6: a failed start leaves a registered but broken service; roll it back.
+        if let Err(del_err) = svc.delete() {
+            return Err(anyhow::anyhow!(
+                "{start_err}; also failed to roll back service registration: {}",
+                super::map_scm_err(del_err)
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "{start_err} (service registration rolled back)"
+        ));
+    }
 
     println!("{}", crate::i18n::svc_created(super::SERVICE_NAME));
     println!("{}", crate::i18n::install_verification());
