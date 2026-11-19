@@ -51,9 +51,8 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
         v6dst = t::NO_LOCALNETS_V6_DST,
     );
 
-    let mut main = format!(
-        "(tcp and !impostor and !loopback {maxpayload} and ({inbound} or {outbound}))"
-    );
+    let mut main =
+        format!("(tcp and !impostor and !loopback {maxpayload} and ({inbound} or {outbound}))");
     if cfg.quic.wants_selective_capture() {
         // The engine decides per destination, so these have to be captured
         // rather than dropped in the driver.
@@ -71,9 +70,13 @@ pub fn build(cfg: &EvasionConfig) -> Result<Filters, CoreError> {
         main.push_str(t::DNS_CLAUSE_PORT53);
     }
 
-    let main = CString::new(main).map_err(|_| CoreError::Filter("main filter has interior NUL".into()))?;
+    let main =
+        CString::new(main).map_err(|_| CoreError::Filter("main filter has interior NUL".into()))?;
     let quic_drop = if cfg.quic.wants_blanket_drop() {
-        Some(CString::new(t::QUIC_DROP).map_err(|_| CoreError::Filter("quic filter has interior NUL".into()))?)
+        Some(
+            CString::new(t::QUIC_DROP)
+                .map_err(|_| CoreError::Filter("quic filter has interior NUL".into()))?,
+        )
     } else {
         None
     };
@@ -96,12 +99,19 @@ mod tests {
         let f = build(&EvasionConfig::default()).unwrap();
         let s = f.main.to_str().unwrap();
         assert_eq!(count(s, '('), count(s, ')'), "main: {s}");
-        assert!(f.quic_drop.is_none(), "selective QUIC needs capture, not a drop handle");
+        assert!(
+            f.quic_drop.is_none(),
+            "selective QUIC needs capture, not a drop handle"
+        );
     }
 
     #[test]
     fn verbatim_fragments_present() {
-        let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
+        let s = build(&EvasionConfig::default())
+            .unwrap()
+            .main
+            .into_string()
+            .unwrap();
         assert!(s.contains(t::NO_LOCALNETS_V4_SRC));
         assert!(s.contains(t::NO_LOCALNETS_V6_DST));
         assert!(s.contains("tcp.Payload[0] == 0x16"));
@@ -111,10 +121,14 @@ mod tests {
 
     #[test]
     fn selective_quic_is_captured_by_the_main_filter() {
-        let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
+        let s = build(&EvasionConfig::default())
+            .unwrap()
+            .main
+            .into_string()
+            .unwrap();
         assert!(s.contains("udp.DstPort == 443"));
         assert!(s.contains("udp.PayloadLength >= 1200"));
-        assert!(s.contains("udp.Payload[0] >= 0xC0"));
+        assert!(s.contains("udp.Payload[0] >= 0x80"));
         assert!(
             !s.contains("udp.Payload32[1b]"),
             "the version pin would miss QUIC v2 and the drafts"
@@ -123,8 +137,28 @@ mod tests {
     }
 
     #[test]
+    fn selective_quic_clause_captures_greased_initials() {
+        let s = build(&EvasionConfig::default())
+            .unwrap()
+            .main
+            .into_string()
+            .unwrap();
+        assert!(
+            s.contains("udp.Payload[0] >= 0x80"),
+            "a greased fixed bit (0x80-0xBF long header) must still reach the engine: {s}"
+        );
+        assert!(
+            !s.contains("udp.Payload[0] >= 0xC0"),
+            "the fixed-bit requirement would miss greased Initials: {s}"
+        );
+    }
+
+    #[test]
     fn quic_off_touches_neither_the_filter_nor_the_drop_handle() {
-        let cfg = EvasionConfig { quic: QuicPolicy::Off, ..Default::default() };
+        let cfg = EvasionConfig {
+            quic: QuicPolicy::Off,
+            ..Default::default()
+        };
         let f = build(&cfg).unwrap();
         let s = f.main.to_str().unwrap();
         assert!(!s.contains("udp"), "no UDP capture at all: {s}");
@@ -133,7 +167,10 @@ mod tests {
 
     #[test]
     fn quic_all_drops_in_the_driver_instead_of_capturing() {
-        let cfg = EvasionConfig { quic: QuicPolicy::All, ..Default::default() };
+        let cfg = EvasionConfig {
+            quic: QuicPolicy::All,
+            ..Default::default()
+        };
         let f = build(&cfg).unwrap();
         assert!(!f.main.to_str().unwrap().contains("udp"));
         assert_eq!(f.quic_drop.unwrap().into_string().unwrap(), t::QUIC_DROP);
@@ -150,25 +187,40 @@ mod tests {
         assert_eq!(count(&s, '('), count(&s, ')'));
     }
 
-
     #[test]
     fn default_filter_covers_the_cloudflare_https_alt_ports() {
-        let s = build(&EvasionConfig::default()).unwrap().main.into_string().unwrap();
+        let s = build(&EvasionConfig::default())
+            .unwrap()
+            .main
+            .into_string()
+            .unwrap();
         for p in [443u16, 2053, 2083, 2087, 2096, 8443] {
-            assert!(s.contains(&format!("tcp.DstPort == {p}")), "outbound missing {p}: {s}");
-            assert!(s.contains(&format!("tcp.SrcPort == {p}")), "inbound missing {p}: {s}");
+            assert!(
+                s.contains(&format!("tcp.DstPort == {p}")),
+                "outbound missing {p}: {s}"
+            );
+            assert!(
+                s.contains(&format!("tcp.SrcPort == {p}")),
+                "inbound missing {p}: {s}"
+            );
         }
         assert_eq!(count(&s, '('), count(&s, ')'), "unbalanced: {s}");
     }
 
     #[test]
     fn tls_ports_are_configurable_and_empty_falls_back_to_443() {
-        let custom = EvasionConfig { tls_ports: vec![443, 9443], ..Default::default() };
+        let custom = EvasionConfig {
+            tls_ports: vec![443, 9443],
+            ..Default::default()
+        };
         let s = build(&custom).unwrap().main.into_string().unwrap();
         assert!(s.contains("tcp.DstPort == 9443"));
         assert!(!s.contains("2096"), "default set not used when overridden");
 
-        let cleared = EvasionConfig { tls_ports: vec![], ..Default::default() };
+        let cleared = EvasionConfig {
+            tls_ports: vec![],
+            ..Default::default()
+        };
         let s = build(&cleared).unwrap().main.into_string().unwrap();
         assert!(s.contains("(tcp.DstPort == 443)"));
         assert!(!s.contains("2083"));

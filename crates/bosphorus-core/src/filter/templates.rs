@@ -31,11 +31,10 @@ pub const QUIC_DROP: &str = "outbound and !impostor and !loopback and udp and ud
 /// [`crate::packet::quic`] does the precise classification once a datagram is
 /// in hand; this clause only has to be cheap and not miss anything.
 ///
-/// `PayloadLength >= 1200` is what makes that safe: a client must pad any
-/// datagram containing an Initial to at least 1200 bytes, so nothing that opens
-/// a connection can slip past, while the short packets of an established
-/// connection never reach the engine.
-pub const QUIC_SELECTIVE_FMT: &str = "(outbound and !impostor and !loopback and udp and {dst_ports} and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0xC0 and ({v4dst} or {v6dst}))";
+/// Matches any QUIC long header (`Payload[0] >= 0x80`), including Initials with
+/// a greased fixed bit (RFC 9287). `PayloadLength >= 1200` keeps short packets
+/// of an established connection out of the engine.
+pub const QUIC_SELECTIVE_FMT: &str = "(outbound and !impostor and !loopback and udp and {dst_ports} and udp.PayloadLength >= 1200 and udp.Payload[0] >= 0x80 and ({v4dst} or {v6dst}))";
 
 /// `maxpayloadsize_str` (goodbyedpi.c:242-245) — verbatim, with GoodbyeDPI's
 /// `%hu` replaced by the `{n}` placeholder. "GET " = 0x47455420,
@@ -44,4 +43,5 @@ pub const MAXPAYLOAD_FMT: &str = "and (tcp.PayloadLength ? tcp.PayloadLength < {
 
 /// `add_filter_str` UDP form (goodbyedpi.c:203-204) with port 53 substituted
 /// for `%d`, and the leading `" or "` dropped (the builder adds it).
-pub const DNS_CLAUSE_PORT53: &str = "(udp and !impostor and !loopback and (udp.SrcPort == 53 or udp.DstPort == 53))";
+pub const DNS_CLAUSE_PORT53: &str =
+    "(udp and !impostor and !loopback and (udp.SrcPort == 53 or udp.DstPort == 53))";
