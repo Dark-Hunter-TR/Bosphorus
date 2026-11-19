@@ -2,7 +2,7 @@
 //! `ValdikSS/GoodbyeDPI` `src/goodbyedpi.c` (`master`):
 //!   * lines 33-61   — `DIVERT_NO_LOCALNETSv4/v6_{SRC,DST}`
 //!   * lines 82-84   — `FILTER_PASSIVE_BLOCK_QUIC`
-//!   * lines 203-204 — `add_filter_str` UDP form (DNS clause)
+//!   * lines 203-204 — `add_filter_str` UDP form (DNS clause; not used: dns_upstream is rejected)
 //!   * lines 242-245 — `maxpayloadsize_str`
 //!
 //! Do not paraphrase or "tidy" these — they must match GoodbyeDPI byte for byte
@@ -45,7 +45,3 @@ pub const QUIC_SELECTIVE_FMT: &str = "(outbound and !impostor and !loopback and 
 /// `%hu` replaced by the `{n}` placeholder. "GET " = 0x47455420,
 /// "POST" = 0x504F5354 (big endian).
 pub const MAXPAYLOAD_FMT: &str = "and (tcp.PayloadLength ? tcp.PayloadLength < {n} or tcp.Payload32[0] == 0x47455420 or tcp.Payload32[0] == 0x504F5354 or (tcp.Payload[0] == 0x16 and tcp.Payload[1] == 0x03 and tcp.Payload[2] <= 0x03): true)";
-
-/// `add_filter_str` UDP form (goodbyedpi.c:203-204) with port 53 substituted
-/// for `%d`, and the leading `" or "` dropped (the builder adds it).
-pub const DNS_CLAUSE_PORT53: &str = "(udp and !impostor and !loopback and (udp.SrcPort == 53 or udp.DstPort == 53))";
