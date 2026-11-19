@@ -56,6 +56,18 @@ jobs:
       - name: Build (release-dist)
         run: cargo build --workspace --profile release-dist --locked
 
+      # build.rs stages these best-effort, but rust-cache can restore a cached
+      # build without the DLL side-effect. Copy deterministically before smoke.
+      - name: Stage WinDivert runtime next to the built exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "assets/WinDivert-$env:WINDIVERT_VERSION-A/x64"
+          $dst = "target/release-dist"
+          Copy-Item "$src/WinDivert.dll" $dst -Force
+          Copy-Item "$src/WinDivert64.sys" $dst -Force
+          Get-ChildItem "$dst/WinDivert*" | Select-Object Name, Length
+
       # Cheap end-to-end smoke test: the built exe actually loads
       # WinDivert.dll, reports its own version, and compiles its filters. No
       # elevation needed.
