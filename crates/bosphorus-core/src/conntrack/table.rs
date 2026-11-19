@@ -32,13 +32,15 @@ const MIN_SHARD_CAP: usize = 32;
 pub struct FlowTable {
     shards: Vec<Mutex<HashMap<FlowKey, FlowState>>>,
     idle: Duration,
+    max_per_shard: usize,
 }
 
 impl FlowTable {
-    pub fn new(idle: Duration) -> Self {
+    pub fn new(idle: Duration, max_flows: usize) -> Self {
         Self {
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
             idle,
+            max_per_shard: (max_flows / SHARDS).max(1),
         }
     }
 
@@ -52,8 +54,22 @@ impl FlowTable {
     }
 
     /// Get-or-create the flow, bump `last_seen`, run `f` against it.
-    pub fn with_mut<R>(&self, key: FlowKey, now: Instant, f: impl FnOnce(&mut FlowState) -> R) -> R {
+    pub fn with_mut<R>(
+        &self,
+        key: FlowKey,
+        now: Instant,
+        f: impl FnOnce(&mut FlowState) -> R,
+    ) -> R {
         let mut g = self.shard(&key).lock();
+        if let Some(st) = g.get_mut(&key) {
+            st.last_seen = now;
+            return f(st);
+        }
+        if g.len() >= self.max_per_shard {
+            if let Some(oldest) = g.iter().min_by_key(|(_, st)| st.last_seen).map(|(k, _)| *k) {
+                g.remove(&oldest);
+            }
+        }
         let st = g.entry(key).or_insert_with(|| FlowState::new(now));
         st.last_seen = now;
         f(st)
@@ -135,9 +151,7 @@ impl FlowTable {
                         outcome: o,
                         target_key: st.target_key.clone(),
                         trial: st.trial,
-                        latency: st
-                            .client_hello_at
-                            .map(|t| now.saturating_duration_since(t)),
+                        latency: st.client_hello_at.map(|t| now.saturating_duration_since(t)),
                         retx: st.client_hello_retx,
                     });
                 }
@@ -179,7 +193,7 @@ mod tests {
 
     #[test]
     fn sweep_drops_only_idle_flows() {
-        let t = FlowTable::new(Duration::from_secs(30));
+        let t = FlowTable::new(Duration::from_secs(30), 4096);
         let start = Instant::now();
 
         t.with_mut(key(1111), start, |st| st.client_hello_seen = true);
@@ -199,7 +213,7 @@ mod tests {
 
     #[test]
     fn sweep_reclaims_bucket_capacity_after_a_burst() {
-        let t = FlowTable::new(Duration::from_secs(30));
+        let t = FlowTable::new(Duration::from_secs(30), 10_000);
         let start = Instant::now();
 
         // Burst: 5000 flows across the shards.
@@ -207,7 +221,10 @@ mod tests {
             t.with_mut(key(1024 + p as u16 % 60000), start, |_| {});
         }
         let (_, cap_peak) = t.stats();
-        assert!(cap_peak > 2000, "capacity grew with the burst (cap={cap_peak})");
+        assert!(
+            cap_peak > 2000,
+            "capacity grew with the burst (cap={cap_peak})"
+        );
 
         // All age out; the next sweep must give the allocation back.
         let removed = t.sweep(start + Duration::from_secs(60));
@@ -222,7 +239,7 @@ mod tests {
 
     #[test]
     fn flowtable_clear_empties_and_releases() {
-        let t = FlowTable::new(Duration::from_secs(30));
+        let t = FlowTable::new(Duration::from_secs(30), 10_000);
         let start = Instant::now();
         for p in 0..5000u32 {
             t.with_mut(key(1024 + p as u16 % 60000), start, |_| {});
@@ -245,7 +262,7 @@ mod tests {
 
     #[test]
     fn sweep_noop_when_all_fresh() {
-        let t = FlowTable::new(Duration::from_secs(30));
+        let t = FlowTable::new(Duration::from_secs(30), 4096);
         let now = Instant::now();
         t.with_mut(key(1), now, |_| {});
         t.with_mut(key(2), now, |_| {});
@@ -255,7 +272,7 @@ mod tests {
 
     #[test]
     fn resolve_timeouts_marks_and_reports_once() {
-        let t = FlowTable::new(Duration::from_secs(60));
+        let t = FlowTable::new(Duration::from_secs(60), 4096);
         let tuning = ConntrackTuning::default();
         let start = Instant::now();
         t.with_mut(key(9), start, |st| {
@@ -269,5 +286,68 @@ mod tests {
         assert_eq!(first[0].outcome, FlowOutcome::Blackhole);
         // Second call: already resolved, nothing new.
         assert!(t.resolve_timeouts(&tuning, later).is_empty());
+    }
+
+    #[test]
+    fn enforces_max_flows_by_evicting_least_recent_in_shard() {
+        let t = FlowTable::new(Duration::from_secs(60), SHARDS * 2);
+        let start = Instant::now();
+
+        let shard_of = |k: &FlowKey| {
+            let mut h = 0u64;
+            for b in super::key_bytes(k) {
+                h = h.wrapping_mul(0x100000001b3).wrapping_add(b as u64);
+            }
+            (h as usize) % SHARDS
+        };
+
+        let k1 = key(1001);
+        let shard = shard_of(&k1);
+        let mut k2 = key(1002);
+        let mut k3 = key(1003);
+        let mut p = 2000u16;
+        while shard_of(&k2) != shard || k2.client_port == k1.client_port {
+            k2 = key(p);
+            p += 1;
+        }
+        while shard_of(&k3) != shard
+            || k3.client_port == k1.client_port
+            || k3.client_port == k2.client_port
+        {
+            k3 = key(p);
+            p += 1;
+        }
+
+        t.with_mut(k1, start, |_| {});
+        t.with_mut(k2, start + Duration::from_secs(1), |_| {});
+        t.with_mut(k1, start + Duration::from_secs(2), |_| {}); // k2 becomes least recent
+        t.with_mut(k3, start + Duration::from_secs(3), |_| {});
+
+        assert_eq!(t.len(), 2, "per-shard cap enforced");
+        assert!(t.peek(&k1, |_| ()).is_some(), "recently touched flow kept");
+        assert!(t.peek(&k3, |_| ()).is_some(), "new flow inserted");
+        assert!(t.peek(&k2, |_| ()).is_none(), "least-recent flow evicted");
+    }
+
+    #[test]
+    fn pressure_fill_distinct_tuples_stays_bounded() {
+        // G16: many different 5-tuples must not grow the table without bound.
+        let max_flows = 64;
+        let t = FlowTable::new(Duration::from_secs(60), max_flows);
+        let start = Instant::now();
+        let bound = (max_flows / SHARDS).max(1) * SHARDS;
+        for i in 0..500u16 {
+            t.with_mut(
+                key(1024 + i),
+                start + Duration::from_millis(i as u64),
+                |_| {},
+            );
+            assert!(
+                t.len() <= bound,
+                "table grew past bound under tuple pressure (len={}, bound={bound})",
+                t.len()
+            );
+        }
+        assert!(t.len() > 0 && t.len() <= bound);
     }
 }
