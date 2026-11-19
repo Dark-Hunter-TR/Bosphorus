@@ -207,6 +207,9 @@ pub struct ConntrackTuning {
     pub app_grace: Duration,
     /// This many ClientHello retransmits (no response) => `Blackhole`.
     pub client_hello_retx_fail: u8,
+    /// Hard ceiling on tracked flows. Past this, the least-recently-seen flow
+    /// in a shard is evicted on insert.
+    pub max_flows: usize,
 }
 
 impl Default for ConntrackTuning {
@@ -216,6 +219,7 @@ impl Default for ConntrackTuning {
             verdict_timeout: Duration::from_secs(5),
             app_grace: Duration::from_secs(1),
             client_hello_retx_fail: 3,
+            max_flows: 4096,
         }
     }
 }

@@ -162,7 +162,7 @@ impl Engine {
     /// Automatic per-target discovery (the default). One fixed network session
     /// built from `cfg.profile`; no live re-keying.
     pub fn new(cfg: EvasionConfig) -> Self {
-        let flows = FlowTable::new(cfg.conntrack.idle_timeout);
+        let flows = FlowTable::new(cfg.conntrack.idle_timeout, cfg.conntrack.max_flows);
         // Initial session from the configured profile (discovery runs only; the
         // CLI passes `profile: None` for forced `--strategy` runs).
         let session = build_session(&cfg, cfg.profile.clone(), None);
