@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -34,6 +36,7 @@ pub struct RunStats {
     pub dropped: u64,
     pub batches: u64,
     pub injected: u64,
+    pub panics: u64,
 }
 
 /// Cooperative stop flag shared with a Ctrl+C / timer handler.
@@ -522,22 +525,41 @@ impl Engine {
 
             let mut meta = captured.meta;
             let mut batch = SendBatch::new();
-            let decision = self.process(captured.data, &mut meta, &mut batch);
+            let step = panic::catch_unwind(AssertUnwindSafe(|| {
+                let decision = self.process(captured.data, &mut meta, &mut batch);
 
-            match decision {
-                Decision::ForwardOriginal => {
-                    sink.inject(captured.data, &meta)?;
-                    stats.injected += 1;
+                match decision {
+                    Decision::ForwardOriginal => {
+                        sink.inject(captured.data, &meta)?;
+                        stats.injected += 1;
+                    }
+                    Decision::DropOriginal => stats.dropped += 1,
+                    Decision::ForwardBatchThenOriginal => {
+                        emit_batch(sink, &mut batch, &mut stats)?;
+                        sink.inject(captured.data, &meta)?;
+                        stats.injected += 1;
+                    }
+                    Decision::ForwardBatchOnly => {
+                        emit_batch(sink, &mut batch, &mut stats)?;
+                        stats.dropped += 1; // original replaced by the batch
+                    }
                 }
-                Decision::DropOriginal => stats.dropped += 1,
-                Decision::ForwardBatchThenOriginal => {
-                    emit_batch(sink, &mut batch, &mut stats)?;
-                    sink.inject(captured.data, &meta)?;
-                    stats.injected += 1;
-                }
-                Decision::ForwardBatchOnly => {
-                    emit_batch(sink, &mut batch, &mut stats)?;
-                    stats.dropped += 1; // original replaced by the batch
+                Ok(())
+            }));
+
+            match step {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(e),
+                Err(payload) => {
+                    let msg = panic_message(&payload);
+                    tracing::error!(
+                        target: "bosphorus::engine",
+                        packet = stats.packets,
+                        panic = %msg,
+                        "panic while handling packet; dropping packet and continuing"
+                    );
+                    stats.panics += 1;
+                    stats.dropped += 1;
                 }
             }
         }
@@ -849,6 +871,16 @@ fn break_tcp_checksum(bytes: &mut [u8]) {
     if off + 2 <= bytes.len() {
         let c = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
         bytes[off..off + 2].copy_from_slice(&c.wrapping_sub(1).to_be_bytes());
+    }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -1813,5 +1845,50 @@ mod tests {
             "interference is a property of the network that was left behind"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_main_isolates_packet_panics_and_continues() {
+        use std::cell::Cell;
+
+        struct PanicOnceSink {
+            panicked: Cell<bool>,
+            injected: Vec<Vec<u8>>,
+        }
+        impl PacketSink for PanicOnceSink {
+            fn inject(&mut self, packet: &[u8], _meta: &CaptureMeta) -> Result<(), CoreError> {
+                if !self.panicked.replace(true) {
+                    panic!("boom");
+                }
+                self.injected.push(packet.to_vec());
+                Ok(())
+            }
+            fn inject_batch(&mut self, batch: &SendBatch) -> Result<(), CoreError> {
+                for it in &batch.items {
+                    self.injected.push(it.bytes.clone());
+                }
+                Ok(())
+            }
+            fn recalc_checksums(
+                &mut self,
+                _packet: &mut [u8],
+                _meta: &mut CaptureMeta,
+                _which: ChecksumWhich,
+            ) -> Result<(), CoreError> {
+                Ok(())
+            }
+        }
+
+        let mut src = VecSource { packets: vec![(vec![1, 2, 3], true), (vec![4, 5, 6], true)], idx: 0 };
+        let mut sink = PanicOnceSink { panicked: Cell::new(false), injected: Vec::new() };
+        let engine = Engine::new(EvasionConfig::default());
+
+        let stats = engine.run_main(&mut src, &mut sink, &StopFlag::new()).unwrap();
+
+        assert_eq!(stats.packets, 2);
+        assert_eq!(stats.panics, 1);
+        assert_eq!(stats.dropped, 1);
+        assert_eq!(stats.injected, 1);
+        assert_eq!(sink.injected, vec![vec![4, 5, 6]]);
     }
 }
