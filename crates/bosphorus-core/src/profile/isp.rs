@@ -345,7 +345,7 @@ mod tests {
         let tmps: Vec<_> = std::fs::read_dir(&isp_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("tmp")))
             .collect();
         assert!(tmps.is_empty(), "left a temp file: {tmps:?}");
     }

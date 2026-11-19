@@ -308,8 +308,8 @@ mod tests {
         std::fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension() == Some(std::ffi::OsStr::new("tmp")))
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".tmp"))
             .collect()
     }
 

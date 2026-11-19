@@ -14,7 +14,10 @@ pub fn run() -> anyhow::Result<()> {
         ) {
             Ok(svc) => {
                 let st = svc.query_status().map_err(super::map_scm_err)?;
-                println!("{}", crate::i18n::svc_state_line(&format!("{:?}", st.current_state)));
+                println!(
+                    "{}",
+                    crate::i18n::svc_state_line(&format!("{:?}", st.current_state))
+                );
             }
             Err(_) => println!("{}", crate::i18n::t(crate::i18n::Msg::SvcNotInstalled)),
         },
@@ -37,17 +40,22 @@ fn newest_profile() -> Option<(String, u64)> {
 fn newest_profile_in(dir: &std::path::Path) -> Option<(String, u64)> {
     let mut best: Option<(String, SystemTime)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry.path().extension().and_then(OsStr::to_str) != Some("json") {
+        if entry.path().extension() != Some(OsStr::new("json")) {
             continue;
         }
-        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else { continue };
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
         let name = entry.file_name().to_string_lossy().into_owned();
         if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
             best = Some((name, mtime));
         }
     }
     let (name, mtime) = best?;
-    let age = SystemTime::now().duration_since(mtime).unwrap_or_default().as_secs();
+    let age = SystemTime::now()
+        .duration_since(mtime)
+        .unwrap_or_default()
+        .as_secs();
     Some((name, age))
 }
 
