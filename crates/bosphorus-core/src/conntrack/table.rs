@@ -52,7 +52,12 @@ impl FlowTable {
     }
 
     /// Get-or-create the flow, bump `last_seen`, run `f` against it.
-    pub fn with_mut<R>(&self, key: FlowKey, now: Instant, f: impl FnOnce(&mut FlowState) -> R) -> R {
+    pub fn with_mut<R>(
+        &self,
+        key: FlowKey,
+        now: Instant,
+        f: impl FnOnce(&mut FlowState) -> R,
+    ) -> R {
         let mut g = self.shard(&key).lock();
         let st = g.entry(key).or_insert_with(|| FlowState::new(now));
         st.last_seen = now;
@@ -135,9 +140,7 @@ impl FlowTable {
                         outcome: o,
                         target_key: st.target_key.clone(),
                         trial: st.trial,
-                        latency: st
-                            .client_hello_at
-                            .map(|t| now.saturating_duration_since(t)),
+                        latency: st.client_hello_at.map(|t| now.saturating_duration_since(t)),
                         retx: st.client_hello_retx,
                     });
                 }
@@ -207,7 +210,10 @@ mod tests {
             t.with_mut(key(1024 + p as u16 % 60000), start, |_| {});
         }
         let (_, cap_peak) = t.stats();
-        assert!(cap_peak > 2000, "capacity grew with the burst (cap={cap_peak})");
+        assert!(
+            cap_peak > 2000,
+            "capacity grew with the burst (cap={cap_peak})"
+        );
 
         // All age out; the next sweep must give the allocation back.
         let removed = t.sweep(start + Duration::from_secs(60));

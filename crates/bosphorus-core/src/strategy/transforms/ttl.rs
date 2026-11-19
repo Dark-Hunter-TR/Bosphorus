@@ -28,7 +28,11 @@ mod tests {
 
     #[test]
     fn auto_heuristic_needs_hops_and_clamps() {
-        let p = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
+        let p = TtlPolicy::AutoHeuristic {
+            delta: 4,
+            min: 3,
+            max: 10,
+        };
         assert_eq!(resolve_ttl(&p, None), None);
         assert_eq!(resolve_ttl(&p, Some(11)), Some(7)); // 11 - 4
         assert_eq!(resolve_ttl(&p, Some(5)), Some(3)); // 1 -> clamp up to min

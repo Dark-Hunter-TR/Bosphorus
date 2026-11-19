@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bosphorus_core::config::QuicPolicy;
 use bosphorus_core::strategy::{
     DefaultGenerator, DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder,
     SplitAnchor, Strategy, TtlPolicy, ACK_DELTA, SEQ_DELTA,
 };
-use bosphorus_core::config::QuicPolicy;
 use bosphorus_core::{filter, Engine, EvasionConfig, NetKeyFn, ProfilePaths, StopFlag};
 use bosphorus_divert::{compile_filter, DivertError, Layer, OpenFlags, Param, WinDivertHandle};
 
@@ -39,7 +39,9 @@ pub enum StrategyArg {
 pub fn parse_strategy(s: &str, enable_overlap: bool) -> anyhow::Result<StrategyArg> {
     let (s, tls_pad) = match s.rsplit_once("+pad:") {
         Some((rest, n)) => {
-            let n: u16 = n.parse().map_err(|_| anyhow::anyhow!("bad pad length '{n}'"))?;
+            let n: u16 = n
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad pad length '{n}'"))?;
             (rest, Some(n))
         }
         None => (s, None),
@@ -53,7 +55,9 @@ pub fn parse_strategy(s: &str, enable_overlap: bool) -> anyhow::Result<StrategyA
         return Ok(StrategyArg::List);
     }
     if let Some(i) = s.strip_prefix("grid:") {
-        let i: usize = i.parse().map_err(|_| anyhow::anyhow!("bad grid index '{s}'"))?;
+        let i: usize = i
+            .parse()
+            .map_err(|_| anyhow::anyhow!("bad grid index '{s}'"))?;
         let g = DefaultGenerator::new(&cfg_for(enable_overlap));
         let st = g
             .all()
@@ -67,11 +71,16 @@ pub fn parse_strategy(s: &str, enable_overlap: bool) -> anyhow::Result<StrategyA
         let (sq, anc) = rest
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("overlap needs 'overlap:<seqovl>/<anchor>'"))?;
-        let seqovl: u16 = sq.parse().map_err(|_| anyhow::anyhow!("bad seqovl '{sq}'"))?;
+        let seqovl: u16 = sq
+            .parse()
+            .map_err(|_| anyhow::anyhow!("bad seqovl '{sq}'"))?;
         let a = parse_anchor(anc)?;
         return Ok(StrategyArg::One(with_pad(Strategy {
             fake: Some(fake_spec(
-                DesyncMethod::OverlapDisorder { seqovl, fill: OverlapFill::Zeros },
+                DesyncMethod::OverlapDisorder {
+                    seqovl,
+                    fill: OverlapFill::Zeros,
+                },
                 None,
             )),
             fragment: Some(FragmentSpec::one(a, true)),
@@ -90,20 +99,31 @@ pub fn parse_strategy(s: &str, enable_overlap: bool) -> anyhow::Result<StrategyA
                 .split(',')
                 .map(parse_anchor)
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            Some(FragmentSpec { anchors, reverse: false })
+            Some(FragmentSpec {
+                anchors,
+                reverse: false,
+            })
         }
     };
 
     let fake = match desync_s {
         "none" => None,
         "wrongseq" => Some(fake_spec(
-            DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA },
+            DesyncMethod::WrongSeq {
+                seq_delta: SEQ_DELTA,
+                ack_delta: ACK_DELTA,
+            },
             None,
         )),
         "wrongsum" => Some(fake_spec(DesyncMethod::WrongChecksum, None)),
         t if t.starts_with("ttl:") => {
-            let n: u8 = t[4..].parse().map_err(|_| anyhow::anyhow!("bad ttl in '{t}'"))?;
-            Some(fake_spec(DesyncMethod::TtlLimited, Some(TtlPolicy::UserFixed(n))))
+            let n: u8 = t[4..]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad ttl in '{t}'"))?;
+            Some(fake_spec(
+                DesyncMethod::TtlLimited,
+                Some(TtlPolicy::UserFixed(n)),
+            ))
         }
         other => anyhow::bail!("unknown desync '{other}'"),
     };
@@ -137,7 +157,10 @@ pub fn build_engine(cfg: EvasionConfig, strategy: Option<Strategy>) -> Engine {
 /// default because overlap can break a real handshake against a
 /// first-received-wins server. `--strategy overlap:...` is unaffected by it.
 fn cfg_for(enable_overlap: bool) -> EvasionConfig {
-    EvasionConfig { enable_overlap_disorder: enable_overlap, ..Default::default() }
+    EvasionConfig {
+        enable_overlap_disorder: enable_overlap,
+        ..Default::default()
+    }
 }
 
 /// Which profile store an interactive `--engine` run resolved to, and why.
@@ -215,14 +238,20 @@ fn parse_anchor(s: &str) -> anyhow::Result<SplitAnchor> {
         "sni" => SplitAnchor::SniStart,
         "sni-mid" => SplitAnchor::SniMiddle,
         "tls" => SplitAnchor::TlsRecordStart,
-        n => SplitAnchor::AbsoluteOffset(
-            n.parse()
-                .map_err(|_| anyhow::anyhow!("bad anchor '{n}' (want u16 | sni | sni-mid | tls)"))?,
-        ),
+        n => {
+            SplitAnchor::AbsoluteOffset(n.parse().map_err(|_| {
+                anyhow::anyhow!("bad anchor '{n}' (want u16 | sni | sni-mid | tls)")
+            })?)
+        }
     })
 }
 fn fake_spec(desync: DesyncMethod, ttl: Option<TtlPolicy>) -> FakeSpec {
-    FakeSpec { desync, ttl, payload: FakePayload::StaticClientHello, repeats: 1 }
+    FakeSpec {
+        desync,
+        ttl,
+        payload: FakePayload::StaticClientHello,
+        repeats: 1,
+    }
 }
 
 pub fn list_grid(enable_overlap: bool) {
@@ -230,7 +259,11 @@ pub fn list_grid(enable_overlap: bool) {
     println!(
         "default grid — {} strategies{}:",
         g.len(),
-        if enable_overlap { " (overlap opted in)" } else { "" }
+        if enable_overlap {
+            " (overlap opted in)"
+        } else {
+            ""
+        }
     );
     for (i, s) in g.all().iter().enumerate() {
         println!("  [{i:>3}] {}", s.describe());
@@ -245,7 +278,9 @@ pub fn list_grid(enable_overlap: bool) {
 /// sweep by one, so `tried` accumulates across invocations. `--fresh` deletes
 /// the demo profile first.
 pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
-    init_tracing_with_default("bosphorus::discovery=info,bosphorus::strategy=info,bosphorus::conntrack=info");
+    init_tracing_with_default(
+        "bosphorus::discovery=info,bosphorus::strategy=info,bosphorus::conntrack=info",
+    );
 
     let dir = std::env::temp_dir().join("bosphorus-discovery-demo");
     let path = bosphorus_core::profile::persist::profile_path(&dir, "demo");
@@ -255,13 +290,19 @@ pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
     }
 
     let cfg = EvasionConfig {
-        profile: Some(ProfilePaths { dir: dir.clone(), net_key: "demo".into() }),
+        profile: Some(ProfilePaths {
+            dir: dir.clone(),
+            net_key: "demo".into(),
+        }),
         ..Default::default()
     };
     let engine = bosphorus_core::Engine::new(cfg);
     anyhow::ensure!(engine.is_discovery(), "Engine::new must be discovery mode");
 
-    let restored = engine.discovery_summary().into_iter().find(|t| t.key == "demo.blocked.test");
+    let restored = engine
+        .discovery_summary()
+        .into_iter()
+        .find(|t| t.key == "demo.blocked.test");
     println!("profile: {}", path.display());
     println!("grid: {} strategies", engine.grid_len());
 
@@ -276,9 +317,16 @@ pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
             let mut ch = demo_client_hello("demo.blocked.test", 50100 + before as u16);
             let mut out = bosphorus_core::SendBatch::new();
             let d = engine.process(&mut ch, &mut out_meta(), &mut out);
-            println!("[A] ClientHello -> {d:?}  parts={}  (bir aday daha uygulandi)", out.len());
+            println!(
+                "[A] ClientHello -> {d:?}  parts={}  (bir aday daha uygulandi)",
+                out.len()
+            );
             let mut rst = demo_rst(50100 + before as u16);
-            engine.process(&mut rst, &mut in_meta(), &mut bosphorus_core::SendBatch::new());
+            engine.process(
+                &mut rst,
+                &mut in_meta(),
+                &mut bosphorus_core::SendBatch::new(),
+            );
             let after = engine
                 .discovery_summary()
                 .into_iter()
@@ -297,7 +345,11 @@ pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
             println!("[1] ClientHello       -> {d1:?}   (beklenen: ForwardOriginal, Probe)");
 
             let mut rst = demo_rst(50001);
-            engine.process(&mut rst, &mut in_meta(), &mut bosphorus_core::SendBatch::new());
+            engine.process(
+                &mut rst,
+                &mut in_meta(),
+                &mut bosphorus_core::SendBatch::new(),
+            );
             println!("[2] inbound RST       -> discovery: Blocked bekleniyor");
 
             // Two concurrent ClientHellos, no verdict between -> D3 parallel sweep.
@@ -322,11 +374,21 @@ pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
                 "     in_flight={in_flight}  distinct_candidates={}   <-- D3: FARKLI aday",
                 bytes_a != bytes_b
             );
-            anyhow::ensure!(in_flight == 2, "M7d: two unresolved explores must be tracked");
-            anyhow::ensure!(bytes_a != bytes_b, "M7d: concurrent connections must sweep different candidates");
+            anyhow::ensure!(
+                in_flight == 2,
+                "M7d: two unresolved explores must be tracked"
+            );
+            anyhow::ensure!(
+                bytes_a != bytes_b,
+                "M7d: concurrent connections must sweep different candidates"
+            );
 
             let mut rst2 = demo_rst(50002);
-            engine.process(&mut rst2, &mut in_meta(), &mut bosphorus_core::SendBatch::new());
+            engine.process(
+                &mut rst2,
+                &mut in_meta(),
+                &mut bosphorus_core::SendBatch::new(),
+            );
             println!("[4]  inbound RST :50002 -> discovery: NextCandidate\n");
         }
     }
@@ -345,16 +407,25 @@ pub fn discovery_demo(fresh: bool) -> anyhow::Result<()> {
 }
 
 fn out_meta() -> bosphorus_core::CaptureMeta {
-    bosphorus_core::CaptureMeta { outbound: true, ..Default::default() }
+    bosphorus_core::CaptureMeta {
+        outbound: true,
+        ..Default::default()
+    }
 }
 fn in_meta() -> bosphorus_core::CaptureMeta {
-    bosphorus_core::CaptureMeta { outbound: false, ..Default::default() }
+    bosphorus_core::CaptureMeta {
+        outbound: false,
+        ..Default::default()
+    }
 }
 
 fn init_tracing_with_default(default: &str) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
 }
 
 /// Minimal IPv4/TCP ClientHello 10.0.0.9:<sport> -> 93.184.216.34:443 with SNI.
@@ -386,7 +457,9 @@ fn demo_client_hello(host: &str, sport: u16) -> Vec<u8> {
     let mut tls = vec![0x16, 0x03, 0x01];
     tls.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     tls.extend_from_slice(&hs);
-    let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 9, 93, 184, 216, 34];
+    let mut p = vec![
+        0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 9, 93, 184, 216, 34,
+    ];
     p.extend_from_slice(&sport.to_be_bytes());
     p.extend_from_slice(&[0x01, 0xbb]);
     p.extend_from_slice(&1000u32.to_be_bytes());
@@ -398,7 +471,9 @@ fn demo_client_hello(host: &str, sport: u16) -> Vec<u8> {
 }
 
 fn demo_rst(sport: u16) -> Vec<u8> {
-    let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 93, 184, 216, 34, 10, 0, 0, 9];
+    let mut p = vec![
+        0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 93, 184, 216, 34, 10, 0, 0, 9,
+    ];
     p.extend_from_slice(&[0x01, 0xbb]);
     p.extend_from_slice(&sport.to_be_bytes());
     p.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x04, 0xff, 0xff, 0, 0, 0, 0]);
@@ -414,8 +489,20 @@ pub fn check_filters() -> anyhow::Result<()> {
         ("default", EvasionConfig::default()),
         // Every shipped filter string gets checked, not just the ones today's
         // defaults happen to build.
-        ("quic=off", EvasionConfig { quic: QuicPolicy::Off, ..Default::default() }),
-        ("quic=all", EvasionConfig { quic: QuicPolicy::All, ..Default::default() }),
+        (
+            "quic=off",
+            EvasionConfig {
+                quic: QuicPolicy::Off,
+                ..Default::default()
+            },
+        ),
+        (
+            "quic=all",
+            EvasionConfig {
+                quic: QuicPolicy::All,
+                ..Default::default()
+            },
+        ),
         (
             "dns-upstream=9.9.9.9",
             EvasionConfig {
@@ -505,8 +592,14 @@ pub struct EngineOpts {
 }
 
 pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
-    let EngineOpts { secs, strategy, enable_overlap, profile_dir: profile_dir_override, isp, quic } =
-        opts;
+    let EngineOpts {
+        secs,
+        strategy,
+        enable_overlap,
+        profile_dir: profile_dir_override,
+        isp,
+        quic,
+    } = opts;
     init_tracing();
     let mut cfg = cfg_for(enable_overlap);
     cfg.quic = quic;
@@ -526,8 +619,8 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
         None
     };
 
-    let filters =
-        filter::build(&cfg).map_err(|e| anyhow::anyhow!("{}", crate::i18n::err_filter_build(&e.to_string())))?;
+    let filters = filter::build(&cfg)
+        .map_err(|e| anyhow::anyhow!("{}", crate::i18n::err_filter_build(&e.to_string())))?;
 
     // Fail fast on a bad filter — user-mode, before touching the driver.
     compile_filter(&filters.main, Layer::Network)
@@ -542,7 +635,11 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
         println!("{}", crate::i18n::engine_mode_auto(engine.grid_len()));
         if let (Some(p), Some(human)) = (engine.config().profile.as_ref(), &net_human) {
             let path = bosphorus_core::profile::persist::profile_path(&p.dir, &p.net_key);
-            let loaded = engine.discovery_summary().iter().filter(|t| t.from_disk).count();
+            let loaded = engine
+                .discovery_summary()
+                .iter()
+                .filter(|t| t.from_disk)
+                .count();
             println!("{}", crate::i18n::profile_line(&path.display().to_string()));
             println!("{}", crate::i18n::net_line(human, loaded));
             if let Some(src) = profile_src {
@@ -570,7 +667,10 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
         }
         println!("  {}", quic_policy_line(quic));
         if enable_overlap {
-            println!("{}", crate::i18n::t(crate::i18n::Msg::OverlapEnabledWarning));
+            println!(
+                "{}",
+                crate::i18n::t(crate::i18n::Msg::OverlapEnabledWarning)
+            );
         }
         // The auto-discovery warning — shown once, discovery mode only.
         println!();
@@ -584,18 +684,19 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
     }
     println!();
 
-    let h = match WinDivertHandle::open(filters.main.as_c_str(), Layer::Network, 0, OpenFlags::new()) {
-        Ok(h) => h,
-        Err(DivertError::Open(e)) => {
-            let hint = match e.0 {
-                5 => crate::i18n::t(crate::i18n::Msg::HintElevated),
-                2 => crate::i18n::t(crate::i18n::Msg::HintDriverColocated),
-                _ => "",
-            };
-            anyhow::bail!("{}", crate::i18n::err_windivert_open(&e.to_string(), hint));
-        }
-        Err(e) => anyhow::bail!("{}", crate::i18n::err_windivert_open(&e.to_string(), "")),
-    };
+    let h =
+        match WinDivertHandle::open(filters.main.as_c_str(), Layer::Network, 0, OpenFlags::new()) {
+            Ok(h) => h,
+            Err(DivertError::Open(e)) => {
+                let hint = match e.0 {
+                    5 => crate::i18n::t(crate::i18n::Msg::HintElevated),
+                    2 => crate::i18n::t(crate::i18n::Msg::HintDriverColocated),
+                    _ => "",
+                };
+                anyhow::bail!("{}", crate::i18n::err_windivert_open(&e.to_string(), hint));
+            }
+            Err(e) => anyhow::bail!("{}", crate::i18n::err_windivert_open(&e.to_string(), "")),
+        };
     // D2: raise the driver's kernel queue above the 4096-packet / 2000-ms
     // defaults (same values GoodbyeDPI uses) so a bulk transfer isn't throttled
     // by the queue filling faster than our recv loop drains it.
@@ -692,7 +793,9 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
                 promoted.len(),
                 if promoted.len() == 1 { "y" } else { "ies" }
             ),
-            Err(e) => tracing::warn!(target: "bosphorus::discovery", error = %e, "isp pool save failed"),
+            Err(e) => {
+                tracing::warn!(target: "bosphorus::discovery", error = %e, "isp pool save failed")
+            }
         }
     }
     let stats = run?;
@@ -740,7 +843,12 @@ pub fn run_engine(opts: EngineOpts) -> anyhow::Result<()> {
                     );
                 }
                 (bosphorus_core::NetPhase::Active, false, Some(a), _) => {
-                    println!("  OK [{src}] {:<32} {:<10} — {}", t.key, phase, i18n::summary_active(a));
+                    println!(
+                        "  OK [{src}] {:<32} {:<10} — {}",
+                        t.key,
+                        phase,
+                        i18n::summary_active(a)
+                    );
                 }
                 _ => {
                     let best = t
@@ -815,7 +923,10 @@ mod tests {
     #[test]
     fn engine_with_no_strategy_is_discovery() {
         let e = build_engine(cfg_for(false), None);
-        assert!(e.is_discovery(), "--engine (no --strategy) must run auto-discovery");
+        assert!(
+            e.is_discovery(),
+            "--engine (no --strategy) must run auto-discovery"
+        );
         // Default (overlap OFF) => 142 split + 12 multi + 6 tls_pad + 6 aggressive fake.
         assert_eq!(e.grid_len(), 166, "grid: {}", e.grid_len());
     }
@@ -824,21 +935,40 @@ mod tests {
     fn enable_overlap_widens_the_discovery_grid() {
         let e = build_engine(cfg_for(true), None);
         assert!(e.is_discovery());
-        assert_eq!(e.grid_len(), 174, "142 split + 12 multi + 6 tls_pad + 6 aggressive + 8 overlap");
+        assert_eq!(
+            e.grid_len(),
+            174,
+            "142 split + 12 multi + 6 tls_pad + 6 aggressive + 8 overlap"
+        );
     }
 
     #[test]
     fn engine_with_strategy_is_forced() {
         let e = build_engine(EvasionConfig::default(), Some(Strategy::m4_fixed()));
-        assert!(!e.is_discovery(), "--engine --strategy ... must force that strategy");
+        assert!(
+            !e.is_discovery(),
+            "--engine --strategy ... must force that strategy"
+        );
     }
 
     #[test]
     fn parse_strategy_forms() {
-        assert!(matches!(parse_strategy("list", false).unwrap(), StrategyArg::List));
-        assert!(matches!(parse_strategy("sni", false).unwrap(), StrategyArg::One(_)));
-        assert!(matches!(parse_strategy("6/wrongsum", false).unwrap(), StrategyArg::One(_)));
-        assert!(matches!(parse_strategy("grid:0", false).unwrap(), StrategyArg::One(_)));
+        assert!(matches!(
+            parse_strategy("list", false).unwrap(),
+            StrategyArg::List
+        ));
+        assert!(matches!(
+            parse_strategy("sni", false).unwrap(),
+            StrategyArg::One(_)
+        ));
+        assert!(matches!(
+            parse_strategy("6/wrongsum", false).unwrap(),
+            StrategyArg::One(_)
+        ));
+        assert!(matches!(
+            parse_strategy("grid:0", false).unwrap(),
+            StrategyArg::One(_)
+        ));
         assert!(matches!(
             parse_strategy("overlap:16/sni", false).unwrap(),
             StrategyArg::One(_)
@@ -854,7 +984,10 @@ mod tests {
         assert!(parse_strategy("none/none", false).is_err());
         // grid:166 (first overlap entry) only exists once overlap is opted in.
         assert!(parse_strategy("grid:166", false).is_err());
-        assert!(matches!(parse_strategy("grid:166", true).unwrap(), StrategyArg::One(_)));
+        assert!(matches!(
+            parse_strategy("grid:166", true).unwrap(),
+            StrategyArg::One(_)
+        ));
 
         // M7c: +pad:<n> forces tls_pad, on any form.
         match parse_strategy("2/wrongseq+pad:512", false).unwrap() {

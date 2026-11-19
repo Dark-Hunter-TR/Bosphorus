@@ -92,7 +92,12 @@ pub fn apply_strategy(
     let mut fakes: Vec<(Vec<u8>, ChecksumOp)> = Vec::new();
     if let Some(fs) = &strat.fake {
         for _ in 0..fs.repeats.max(1) {
-            fakes.push(fake_packet::build_fake(fs, &view, ctx.hops_to_server, ctx.discovered_ttl)?);
+            fakes.push(fake_packet::build_fake(
+                fs,
+                &view,
+                ctx.hops_to_server,
+                ctx.discovered_ttl,
+            )?);
         }
     }
 
@@ -134,7 +139,13 @@ pub fn apply_strategy(
 
 /// Push `pkt` into `out`, first splitting it into `<= max_seg`-payload segments
 /// (with sequential TCP seqs and fixed IP length) if it is oversized.
-fn push_capped(out: &mut SendBatch, pkt: Vec<u8>, meta: CaptureMeta, max_seg: usize, op: ChecksumOp) {
+fn push_capped(
+    out: &mut SendBatch,
+    pkt: Vec<u8>,
+    meta: CaptureMeta,
+    max_seg: usize,
+    op: ChecksumOp,
+) {
     let Ok(v) = PacketView::parse(&pkt) else {
         out.push_op(pkt, meta, op);
         return;
@@ -189,12 +200,16 @@ mod tests {
     };
 
     fn clienthello_pkt() -> Vec<u8> {
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&1_000_000u32.to_be_bytes());
         p.extend_from_slice(&2_000_000u32.to_be_bytes());
         p.extend_from_slice(&[0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
-        p.extend_from_slice(&[0x16, 0x03, 0x01, 0x00, 0x0f, 0x01, 0x00, 0x00, 0x0b, 0x03, 0x03]);
+        p.extend_from_slice(&[
+            0x16, 0x03, 0x01, 0x00, 0x0f, 0x01, 0x00, 0x00, 0x0b, 0x03, 0x03,
+        ]);
         p.extend_from_slice(&[0xAA; 9]);
         let total = p.len() as u16;
         p[2..4].copy_from_slice(&total.to_be_bytes());
@@ -234,7 +249,9 @@ mod tests {
         let mut tls = vec![0x16, 0x03, 0x01];
         tls.extend_from_slice(&(hs.len() as u16).to_be_bytes());
         tls.extend_from_slice(&hs);
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&1000u32.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
@@ -262,8 +279,17 @@ mod tests {
             order: SendOrder::FakeThenReal,
             tls_pad: Some(512),
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
@@ -288,17 +314,36 @@ mod tests {
         let view = PacketView::parse(&pkt).unwrap();
         let orig_len = view.payload().len();
 
-        let strat =
-            Strategy { fake: None, fragment: None, order: SendOrder::FakeThenReal, tls_pad: Some(512) };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let strat = Strategy {
+            fake: None,
+            fragment: None,
+            order: SendOrder::FakeThenReal,
+            tls_pad: Some(512),
+        };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
             Disposition::EmitBatchDropOriginal
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(PacketView::parse(&out.items[0].bytes).unwrap().payload().len(), orig_len + 4 + 512);
+        assert_eq!(
+            PacketView::parse(&out.items[0].bytes)
+                .unwrap()
+                .payload()
+                .len(),
+            orig_len + 4 + 512
+        );
     }
 
     #[test]
@@ -309,7 +354,10 @@ mod tests {
 
         let strat = Strategy {
             fake: Some(FakeSpec {
-                desync: DesyncMethod::WrongSeq { seq_delta: -1, ack_delta: -2 },
+                desync: DesyncMethod::WrongSeq {
+                    seq_delta: -1,
+                    ack_delta: -2,
+                },
                 ttl: None,
                 payload: FakePayload::StaticClientHello,
                 repeats: 1,
@@ -318,8 +366,17 @@ mod tests {
             order: SendOrder::FakeThenReal,
             tls_pad: Some(512),
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(10), discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: Some(10),
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
         assert_eq!(out.len(), 3, "fake + 2 real segments");
@@ -345,8 +402,17 @@ mod tests {
             order: SendOrder::FakeThenReal,
             tls_pad: Some(512),
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         assert!(apply_strategy(&strat, &ctx, &mut SendBatch::new()).is_err());
     }
 
@@ -357,8 +423,17 @@ mod tests {
         let seq = view.tcp_seq().unwrap();
         let payload = view.payload().to_vec();
 
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: Some(11), discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: Some(11),
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         let disp = apply_strategy(&Strategy::m4_fixed(), &ctx, &mut out).unwrap();
 
@@ -374,7 +449,9 @@ mod tests {
     }
 
     fn big_clienthello_pkt(payload_len: usize) -> Vec<u8> {
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&1_000u32.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
@@ -398,7 +475,10 @@ mod tests {
 
         let strat = Strategy {
             fake: Some(FakeSpec {
-                desync: DesyncMethod::OverlapDisorder { seqovl: 16, fill: OverlapFill::Zeros },
+                desync: DesyncMethod::OverlapDisorder {
+                    seqovl: 16,
+                    fill: OverlapFill::Zeros,
+                },
                 ttl: None,
                 payload: FakePayload::StaticClientHello,
                 repeats: 1,
@@ -407,8 +487,17 @@ mod tests {
             order: SendOrder::FakeThenReal,
             tls_pad: None,
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         assert_eq!(
             apply_strategy(&strat, &ctx, &mut out).unwrap(),
@@ -445,8 +534,17 @@ mod tests {
             order: SendOrder::FakeThenReal,
             tls_pad: None,
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 
@@ -471,21 +569,39 @@ mod tests {
         let strat = Strategy {
             fake: None,
             fragment: Some(FragmentSpec {
-                anchors: vec![SplitAnchor::AbsoluteOffset(10), SplitAnchor::AbsoluteOffset(50)],
+                anchors: vec![
+                    SplitAnchor::AbsoluteOffset(10),
+                    SplitAnchor::AbsoluteOffset(50),
+                ],
                 reverse: true,
             }),
             order: SendOrder::FakeThenReal,
             tls_pad: None,
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 
         assert_eq!(out.len(), 3);
         // First on the wire is the logically-last segment: payload[50..].
-        assert_eq!(PacketView::parse(&out.items[0].bytes).unwrap().payload(), &payload[50..]);
-        assert_eq!(PacketView::parse(&out.items[2].bytes).unwrap().payload(), &payload[..10]);
+        assert_eq!(
+            PacketView::parse(&out.items[0].bytes).unwrap().payload(),
+            &payload[50..]
+        );
+        assert_eq!(
+            PacketView::parse(&out.items[2].bytes).unwrap().payload(),
+            &payload[..10]
+        );
     }
 
     #[test]
@@ -494,7 +610,10 @@ mod tests {
         let view = PacketView::parse(&pkt).unwrap();
         let strat = Strategy {
             fake: Some(FakeSpec {
-                desync: DesyncMethod::OverlapDisorder { seqovl: 8, fill: OverlapFill::Zeros },
+                desync: DesyncMethod::OverlapDisorder {
+                    seqovl: 8,
+                    fill: OverlapFill::Zeros,
+                },
                 ttl: None,
                 payload: FakePayload::StaticClientHello,
                 repeats: 1,
@@ -504,7 +623,13 @@ mod tests {
             tls_pad: None,
         };
         let meta = CaptureMeta::default();
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         assert!(apply_strategy(&strat, &ctx, &mut SendBatch::new()).is_err());
     }
 
@@ -523,8 +648,17 @@ mod tests {
             order: crate::strategy::model::SendOrder::FakeThenReal,
             tls_pad: None,
         };
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
-        let ctx = TransformCtx { view: &view, meta: &meta, hops_to_server: None, discovered_ttl: None, max_seg: 1200 };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
+        let ctx = TransformCtx {
+            view: &view,
+            meta: &meta,
+            hops_to_server: None,
+            discovered_ttl: None,
+            max_seg: 1200,
+        };
         let mut out = SendBatch::new();
         apply_strategy(&strat, &ctx, &mut out).unwrap();
 
@@ -537,7 +671,10 @@ mod tests {
             assert_eq!(v.tcp_seq(), Some(expect_seq));
             expect_seq = expect_seq.wrapping_add(v.payload().len() as u32);
             rebuilt.extend_from_slice(v.payload());
-            assert_eq!(u16::from_be_bytes([it.bytes[2], it.bytes[3]]), it.bytes.len() as u16);
+            assert_eq!(
+                u16::from_be_bytes([it.bytes[2], it.bytes[3]]),
+                it.bytes.len() as u16
+            );
         }
         assert_eq!(rebuilt, payload);
         assert!(out.len() >= 3);

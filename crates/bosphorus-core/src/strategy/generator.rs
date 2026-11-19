@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use crate::config::EvasionConfig;
 use crate::strategy::model::{
-    DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder, SplitAnchor, Strategy,
-    StrategyId, TtlPolicy, ACK_DELTA, SEQ_DELTA,
+    DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder, SplitAnchor,
+    Strategy, StrategyId, TtlPolicy, ACK_DELTA, SEQ_DELTA,
 };
 
 /// True if `s` uses [`DesyncMethod::OverlapDisorder`] — gated away from
@@ -141,15 +141,25 @@ impl GridAxes {
 }
 
 /// Default seed for the `AutoHeuristic` TTL (zapret-ish `+4:3-10`).
-const HEURISTIC_TTL: TtlPolicy = TtlPolicy::AutoHeuristic { delta: 4, min: 3, max: 10 };
+const HEURISTIC_TTL: TtlPolicy = TtlPolicy::AutoHeuristic {
+    delta: 4,
+    min: 3,
+    max: 10,
+};
 
 fn fake_for(kind: DesyncKind, repeats: u8) -> Option<FakeSpec> {
     let desync = match kind {
         DesyncKind::None => return None,
-        DesyncKind::WrongSeq => DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA },
+        DesyncKind::WrongSeq => DesyncMethod::WrongSeq {
+            seq_delta: SEQ_DELTA,
+            ack_delta: ACK_DELTA,
+        },
         DesyncKind::WrongChecksum => DesyncMethod::WrongChecksum,
         DesyncKind::TtlLimited => DesyncMethod::TtlLimited,
-        DesyncKind::SeqPlusTtl => DesyncMethod::SeqPlusTtl { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA },
+        DesyncKind::SeqPlusTtl => DesyncMethod::SeqPlusTtl {
+            seq_delta: SEQ_DELTA,
+            ack_delta: ACK_DELTA,
+        },
         DesyncKind::ChecksumPlusTtl => DesyncMethod::ChecksumPlusTtl,
     };
     let ttl = matches!(
@@ -192,7 +202,15 @@ fn build_grid(axes: &GridAxes) -> Vec<Strategy> {
                         if fake.is_none() && fragment.is_none() {
                             continue; // pure passthrough — not a strategy
                         }
-                        push(&mut out, Strategy { fake, fragment, order, tls_pad: None });
+                        push(
+                            &mut out,
+                            Strategy {
+                                fake,
+                                fragment,
+                                order,
+                                tls_pad: None,
+                            },
+                        );
                     }
                 }
             }
@@ -207,7 +225,10 @@ fn build_grid(axes: &GridAxes) -> Vec<Strategy> {
                     &mut out,
                     Strategy {
                         fake: fake_for(desync, 1),
-                        fragment: Some(FragmentSpec { anchors: pattern.clone(), reverse }),
+                        fragment: Some(FragmentSpec {
+                            anchors: pattern.clone(),
+                            reverse,
+                        }),
                         order: SendOrder::FakeThenReal,
                         tls_pad: None,
                     },
@@ -223,7 +244,10 @@ fn build_grid(axes: &GridAxes) -> Vec<Strategy> {
                 &mut out,
                 Strategy {
                     fake: fake_for(desync, 1),
-                    fragment: Some(FragmentSpec { anchors: anchors.clone(), reverse: false }),
+                    fragment: Some(FragmentSpec {
+                        anchors: anchors.clone(),
+                        reverse: false,
+                    }),
                     order: SendOrder::FakeThenReal,
                     tls_pad: Some(TLS_PAD_LEN),
                 },
@@ -255,7 +279,10 @@ fn build_grid(axes: &GridAxes) -> Vec<Strategy> {
                 &mut out,
                 Strategy {
                     fake: Some(FakeSpec {
-                        desync: DesyncMethod::OverlapDisorder { seqovl, fill: OverlapFill::Zeros },
+                        desync: DesyncMethod::OverlapDisorder {
+                            seqovl,
+                            fill: OverlapFill::Zeros,
+                        },
                         ttl: None,
                         payload: FakePayload::StaticClientHello,
                         repeats: 1,
@@ -296,18 +323,24 @@ impl DefaultGenerator {
     /// single-entry list.
     pub fn new(cfg: &EvasionConfig) -> Self {
         if cfg.has_strategy_override() {
-            return Self { strategies: vec![single_from_overrides(cfg)] };
+            return Self {
+                strategies: vec![single_from_overrides(cfg)],
+            };
         }
         let axes = if cfg.enable_overlap_disorder {
             GridAxes::with_overlap()
         } else {
             GridAxes::default()
         };
-        Self { strategies: build_grid(&axes) }
+        Self {
+            strategies: build_grid(&axes),
+        }
     }
 
     pub fn with_axes(axes: &GridAxes) -> Self {
-        Self { strategies: build_grid(axes) }
+        Self {
+            strategies: build_grid(axes),
+        }
     }
 
     pub fn all(&self) -> &[Strategy] {
@@ -350,7 +383,11 @@ mod tests {
         let a = DefaultGenerator::new(&EvasionConfig::default());
         let b = DefaultGenerator::new(&EvasionConfig::default());
         assert_eq!(a.len(), b.len());
-        assert!(a.len() > 20, "grid has a meaningful number of candidates: {}", a.len());
+        assert!(
+            a.len() > 20,
+            "grid has a meaningful number of candidates: {}",
+            a.len()
+        );
 
         let ids: HashSet<_> = a.all().iter().map(|s| s.id()).collect();
         assert_eq!(ids.len(), a.len(), "no duplicate strategy ids");
@@ -371,7 +408,10 @@ mod tests {
     fn override_collapses_grid_to_one() {
         let cfg = EvasionConfig {
             fragment_override: Some(FragmentSpec::one(SplitAnchor::AbsoluteOffset(7), false)),
-            desync_override: Some(DesyncMethod::WrongSeq { seq_delta: -1, ack_delta: -2 }),
+            desync_override: Some(DesyncMethod::WrongSeq {
+                seq_delta: -1,
+                ack_delta: -2,
+            }),
             ..Default::default()
         };
         let g = DefaultGenerator::new(&cfg);
@@ -405,7 +445,10 @@ mod tests {
         // an overlap strategy.
         let mut tried = Vec::new();
         while let Some(s) = g.next_candidate(&tried, &|_| true) {
-            assert!(!is_overlap_family(s), "swept an overlap strategy from the default grid");
+            assert!(
+                !is_overlap_family(s),
+                "swept an overlap strategy from the default grid"
+            );
             tried.push(s.id());
         }
     }
@@ -418,7 +461,11 @@ mod tests {
             .iter()
             .filter(|s| s.fragment.as_ref().is_some_and(|f| f.anchors.len() >= 2))
             .collect();
-        assert_eq!(multi.len(), 12, "3 patterns x 2 reverse x {{none, wrong-seq}}");
+        assert_eq!(
+            multi.len(),
+            12,
+            "3 patterns x 2 reverse x {{none, wrong-seq}}"
+        );
         // They come after the 142 single-split entries.
         let first_multi = g
             .all()
@@ -438,16 +485,24 @@ mod tests {
             .all()
             .iter()
             .filter(|s| {
-                s.fake.as_ref().is_some_and(|f| f.payload == FakePayload::AggressiveClientHello)
+                s.fake
+                    .as_ref()
+                    .is_some_and(|f| f.payload == FakePayload::AggressiveClientHello)
             })
             .collect();
-        assert_eq!(aggressive.len(), 6, "3 anchors x {{wrong-seq, wrong-cksum}}");
+        assert_eq!(
+            aggressive.len(),
+            6,
+            "3 anchors x {{wrong-seq, wrong-cksum}}"
+        );
         // They come after tls_pad (indices 142+12=154..159), before overlap.
         let first = g
             .all()
             .iter()
             .position(|s| {
-                s.fake.as_ref().is_some_and(|f| f.payload == FakePayload::AggressiveClientHello)
+                s.fake
+                    .as_ref()
+                    .is_some_and(|f| f.payload == FakePayload::AggressiveClientHello)
             })
             .unwrap();
         assert_eq!(first, 160);
@@ -468,7 +523,10 @@ mod tests {
 
     #[test]
     fn overlap_is_opt_in_and_gating_filters_it() {
-        let cfg = EvasionConfig { enable_overlap_disorder: true, ..Default::default() };
+        let cfg = EvasionConfig {
+            enable_overlap_disorder: true,
+            ..Default::default()
+        };
         let g = DefaultGenerator::new(&cfg);
         let overlap: Vec<_> = g.all().iter().filter(|s| is_overlap_family(s)).collect();
         assert_eq!(overlap.len(), 8, "4 anchors x 2 seqovl");
@@ -489,7 +547,9 @@ mod tests {
         // without the gate, the overlap candidates are still available
         assert!(g.next_candidate(&tried, &|_| true).is_some());
         tried.clear();
-        assert!(!is_overlap_family(g.next_candidate(&tried, &|_| true).unwrap()));
+        assert!(!is_overlap_family(
+            g.next_candidate(&tried, &|_| true).unwrap()
+        ));
     }
 
     /// One-segment ClientHello (IPv4/TCP) with a `server_name` extension.
@@ -521,7 +581,9 @@ mod tests {
         let mut tls = vec![0x16, 0x03, 0x01];
         tls.extend_from_slice(&(hs.len() as u16).to_be_bytes());
         tls.extend_from_slice(&hs);
-        let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8];
+        let mut p = vec![
+            0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 5, 6, 7, 8,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]);
         p.extend_from_slice(&1000u32.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
@@ -539,10 +601,16 @@ mod tests {
 
         let pkt = clienthello_with_sni("updates.discord.com");
         let view = PacketView::parse(&pkt).unwrap();
-        let meta = CaptureMeta { outbound: true, ..Default::default() };
+        let meta = CaptureMeta {
+            outbound: true,
+            ..Default::default()
+        };
 
         // Sweep both the default grid and the overlap-opted-in grid.
-        let overlap_cfg = EvasionConfig { enable_overlap_disorder: true, ..Default::default() };
+        let overlap_cfg = EvasionConfig {
+            enable_overlap_disorder: true,
+            ..Default::default()
+        };
         let g = DefaultGenerator::new(&overlap_cfg);
         let mut ok = 0;
         for s in g.all() {

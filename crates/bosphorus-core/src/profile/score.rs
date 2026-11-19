@@ -60,7 +60,9 @@ impl StrategyQuality {
     /// fields take the better (lower) of the two. EWMA is not associative across
     /// merges, so `latency_ewma` is only kept for rough tie-breaking here.
     pub fn merge(&mut self, other: &Self) {
-        self.retx_free_successes = self.retx_free_successes.saturating_add(other.retx_free_successes);
+        self.retx_free_successes = self
+            .retx_free_successes
+            .saturating_add(other.retx_free_successes);
         self.slow_successes = self.slow_successes.saturating_add(other.slow_successes);
         self.min_latency = match (self.min_latency, other.min_latency) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -139,7 +141,10 @@ mod tests {
         assert_eq!(q.min_latency, Some(Duration::from_millis(120)));
         // EWMA moved toward the samples, dominated by the first.
         let ewma = q.latency_ewma.unwrap();
-        assert!(ewma > Duration::from_millis(120) && ewma < Duration::from_millis(500), "{ewma:?}");
+        assert!(
+            ewma > Duration::from_millis(120) && ewma < Duration::from_millis(500),
+            "{ewma:?}"
+        );
     }
 
     #[test]
@@ -161,16 +166,28 @@ mod tests {
         s.note(
             false,
             t,
-            VerdictTiming { latency: Some(Duration::from_millis(50)), retx: 0, injector_hops: None },
+            VerdictTiming {
+                latency: Some(Duration::from_millis(50)),
+                retx: 0,
+                injector_hops: None,
+            },
         );
         assert_eq!(s.trials, 1);
         assert_eq!(s.successes, 0);
-        assert_eq!(s.quality, StrategyQuality::default(), "failed trial leaves quality untouched");
+        assert_eq!(
+            s.quality,
+            StrategyQuality::default(),
+            "failed trial leaves quality untouched"
+        );
 
         s.note(
             true,
             t,
-            VerdictTiming { latency: Some(Duration::from_millis(80)), retx: 0, injector_hops: None },
+            VerdictTiming {
+                latency: Some(Duration::from_millis(80)),
+                retx: 0,
+                injector_hops: None,
+            },
         );
         assert_eq!(s.successes, 1);
         assert_eq!(s.quality.retx_free_successes, 1);

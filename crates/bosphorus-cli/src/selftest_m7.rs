@@ -13,7 +13,9 @@ use std::ffi::CString;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bosphorus_divert::{calc_checksums, ChecksumFlags, DivertError, Layer, OpenFlags, WinDivertHandle};
+use bosphorus_divert::{
+    calc_checksums, ChecksumFlags, DivertError, Layer, OpenFlags, WinDivertHandle,
+};
 
 const BUF: usize = 65_535;
 const WINDOW_SECS: u64 = 20;
@@ -124,9 +126,9 @@ fn open(filter: &str, flags: OpenFlags) -> anyhow::Result<WinDivertHandle> {
     let c = CString::new(filter).expect("static filter has no NUL");
     match WinDivertHandle::open(c.as_c_str(), Layer::Network, 0, flags) {
         Ok(h) => Ok(h),
-        Err(DivertError::Open(e)) if e.0 == 5 => {
-            Err(anyhow::anyhow!("WinDivertOpen: ERROR_ACCESS_DENIED — elevated calistirin"))
-        }
+        Err(DivertError::Open(e)) if e.0 == 5 => Err(anyhow::anyhow!(
+            "WinDivertOpen: ERROR_ACCESS_DENIED — elevated calistirin"
+        )),
         Err(e) => Err(anyhow::anyhow!("WinDivertOpen basarisiz: {e}")),
     }
 }
@@ -279,7 +281,10 @@ fn t_two_overlapping_segments() -> String {
                                 let dt = injected_at.map(|t| t.elapsed().as_millis()).unwrap_or(0);
                                 let p = r.data.get(l4.payload_off..).unwrap_or(&[]);
                                 if l4.rst {
-                                    report = format!("V-B: {dt}ms sonra inbound RST (ip.ttl={})", r.data[8]);
+                                    report = format!(
+                                        "V-B: {dt}ms sonra inbound RST (ip.ttl={})",
+                                        r.data[8]
+                                    );
                                     let _ = h.send(r.data, &r.addr);
                                     let _ = h.shutdown_both();
                                     break;
@@ -289,7 +294,8 @@ fn t_two_overlapping_segments() -> String {
                                     let _ = h.shutdown_both();
                                     break;
                                 } else {
-                                    report = format!("V-B: {dt}ms — yalnizca ACK (RST/ServerHello yok)");
+                                    report =
+                                        format!("V-B: {dt}ms — yalnizca ACK (RST/ServerHello yok)");
                                 }
                             }
                         }

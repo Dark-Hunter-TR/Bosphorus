@@ -1,9 +1,9 @@
 //! Per-target discovery state. M6: in-memory only. M8 adds serde + a disk store
 //! keyed by network fingerprint.
 
-mod score;
 pub mod isp;
 pub mod persist;
+mod score;
 
 pub use isp::IspPool;
 pub use score::{ScoredStrategy, StrategyQuality};
@@ -35,7 +35,11 @@ pub struct VerdictTiming {
 
 impl VerdictTiming {
     /// No timing information (synthetic verdict / test).
-    pub const NONE: Self = Self { latency: None, retx: 0, injector_hops: None };
+    pub const NONE: Self = Self {
+        latency: None,
+        retx: 0,
+        injector_hops: None,
+    };
 }
 
 /// Where a target is in the discovery lifecycle.
@@ -323,7 +327,11 @@ mod tests {
 
         ts.expire_in_flight(later, Duration::from_secs(15));
         let live: Vec<_> = ts.in_flight.iter().map(|f| f.id).collect();
-        assert_eq!(live, vec![id(2)], "the 20s-old entry is gone, the fresh one stays");
+        assert_eq!(
+            live,
+            vec![id(2)],
+            "the 20s-old entry is gone, the fresh one stays"
+        );
     }
 
     #[test]
@@ -334,6 +342,9 @@ mod tests {
         ts.mark_assigned(Some(id(1)), now);
         ts.mark_assigned(Some(id(2)), now);
         ts.clear_in_flight(id(1));
-        assert_eq!(ts.in_flight.iter().map(|f| f.id).collect::<Vec<_>>(), vec![id(2)]);
+        assert_eq!(
+            ts.in_flight.iter().map(|f| f.id).collect::<Vec<_>>(),
+            vec![id(2)]
+        );
     }
 }

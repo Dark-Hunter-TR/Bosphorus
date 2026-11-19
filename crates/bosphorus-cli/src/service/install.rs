@@ -32,7 +32,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         quic: crate::parse_quic(args)?,
         profile_dir: value_after(args, "--profile-dir").map(PathBuf::from),
         install_dir: value_after(args, "--install-dir").map(PathBuf::from),
-        start_demand: value_after(args, "--start").map(|s| s.eq_ignore_ascii_case("demand"))
+        start_demand: value_after(args, "--start")
+            .map(|s| s.eq_ignore_ascii_case("demand"))
             .unwrap_or(false),
         force: args.iter().any(|a| a == "--force"),
     };
@@ -40,7 +41,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
     // Elevated re-spawn from the double-click launcher: its console is hidden,
     // so also surface the outcome in a MessageBox.
-    let from_launcher = args.iter().any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG);
+    let from_launcher = args
+        .iter()
+        .any(|a| a == crate::launcher::FROM_LAUNCHER_FLAG);
     let res = install(&opts);
     if from_launcher {
         crate::launcher::show_install_result(&res);
@@ -103,9 +106,18 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
         reboot_msg: None,
         command: None,
         actions: Some(vec![
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(5) },
-            ServiceAction { action_type: ServiceActionType::Restart, delay: Duration::from_secs(30) },
-            ServiceAction { action_type: ServiceActionType::None, delay: Duration::ZERO },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(30),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::None,
+                delay: Duration::ZERO,
+            },
         ]),
     });
     let _ = svc.set_failure_actions_on_non_crash_failures(true);
@@ -149,7 +161,10 @@ fn lang_code(l: crate::i18n::Lang) -> &'static str {
 }
 
 fn value_after<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
-    args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).map(String::as_str)
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// Absolute path to register as the service binary. `--install-dir` copies the
@@ -161,7 +176,9 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
         return Ok(current);
     };
     std::fs::create_dir_all(dst_dir)?;
-    let src_dir = current.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let src_dir = current
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let exe_dst = dst_dir.join("bosphorus.exe");
     std::fs::copy(&current, &exe_dst)?;
     for f in ["WinDivert.dll", "WinDivert64.sys"] {
@@ -169,7 +186,11 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
         if s.exists() {
             std::fs::copy(&s, dst_dir.join(f))?;
         } else {
-            eprintln!("warning: {} not found next to the exe; copy it into {} manually", f, dst_dir.display());
+            eprintln!(
+                "warning: {} not found next to the exe; copy it into {} manually",
+                f,
+                dst_dir.display()
+            );
         }
     }
     Ok(exe_dst)
@@ -177,7 +198,15 @@ fn resolve_exe(opts: &Opts) -> anyhow::Result<PathBuf> {
 
 fn warn_if_transient(p: &std::path::Path) {
     let s = p.to_string_lossy().to_ascii_lowercase();
-    if ["\\temp\\", "\\downloads\\", "\\target\\", "\\appdata\\local\\temp"].iter().any(|m| s.contains(m)) {
+    if [
+        "\\temp\\",
+        "\\downloads\\",
+        "\\target\\",
+        "\\appdata\\local\\temp",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+    {
         eprintln!(
             "warning: the exe lives at a transient-looking path:\n  {}\n\
              move it somewhere stable (e.g. C:\\Program Files\\Bosphorus\\) or use --install-dir,\n\
@@ -202,7 +231,9 @@ fn preflight_windivert(force: bool) -> anyhow::Result<()> {
             eprintln!("{}", crate::i18n::preflight_warn_forced(&e.to_string()));
             Ok(())
         }
-        Err(DivertError::Open(e)) => anyhow::bail!("{}", crate::i18n::preflight_fail(&e.to_string())),
+        Err(DivertError::Open(e)) => {
+            anyhow::bail!("{}", crate::i18n::preflight_fail(&e.to_string()))
+        }
         Err(e) if force => {
             eprintln!("pre-flight: {e} (--force)");
             Ok(())
@@ -235,7 +266,10 @@ mod tests {
     #[test]
     fn launch_arguments_minimal_is_just_service_run_lang_and_quic() {
         let v = build_launch_arguments(&opts(Lang::En, false, None));
-        assert_eq!(as_strings(&v), ["service", "run", "--lang", "en", "--quic", "blocked"]);
+        assert_eq!(
+            as_strings(&v),
+            ["service", "run", "--lang", "en", "--quic", "blocked"]
+        );
     }
 
     #[test]
@@ -244,8 +278,15 @@ mod tests {
         assert_eq!(
             as_strings(&v),
             [
-                "service", "run", "--lang", "tr", "--enable-overlap", "--quic", "blocked",
-                "--profile-dir", r"C:\pd"
+                "service",
+                "run",
+                "--lang",
+                "tr",
+                "--enable-overlap",
+                "--quic",
+                "blocked",
+                "--profile-dir",
+                r"C:\pd"
             ]
         );
     }
@@ -256,7 +297,15 @@ mod tests {
         assert!(!v.iter().any(|o| o == "--profile-dir"));
         assert_eq!(
             as_strings(&v),
-            ["service", "run", "--lang", "en", "--enable-overlap", "--quic", "blocked"]
+            [
+                "service",
+                "run",
+                "--lang",
+                "en",
+                "--enable-overlap",
+                "--quic",
+                "blocked"
+            ]
         );
     }
 
@@ -268,7 +317,10 @@ mod tests {
             let mut o = opts(Lang::En, false, None);
             o.quic = p;
             let v = as_strings(&build_launch_arguments(&o));
-            let i = v.iter().position(|a| a == "--quic").expect("--quic present");
+            let i = v
+                .iter()
+                .position(|a| a == "--quic")
+                .expect("--quic present");
             assert_eq!(v[i + 1], p.as_str());
         }
     }
@@ -281,7 +333,11 @@ mod tests {
 
     #[test]
     fn value_after_reads_the_following_token_only() {
-        let s = ["--profile-dir".to_string(), "p".to_string(), "--force".to_string()];
+        let s = [
+            "--profile-dir".to_string(),
+            "p".to_string(),
+            "--force".to_string(),
+        ];
         assert_eq!(value_after(&s, "--profile-dir"), Some("p"));
         assert_eq!(value_after(&s, "--force"), None); // flag, nothing after
         assert_eq!(value_after(&s, "--missing"), None);

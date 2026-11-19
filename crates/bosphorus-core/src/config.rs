@@ -306,7 +306,10 @@ mod tests {
     #[test]
     fn quic_policy_parsing_is_forgiving_about_case_and_spacing() {
         assert_eq!(" OFF ".parse::<QuicPolicy>().unwrap(), QuicPolicy::Off);
-        assert_eq!("Blocked".parse::<QuicPolicy>().unwrap(), QuicPolicy::Blocked);
+        assert_eq!(
+            "Blocked".parse::<QuicPolicy>().unwrap(),
+            QuicPolicy::Blocked
+        );
         assert_eq!("auto".parse::<QuicPolicy>().unwrap(), QuicPolicy::Blocked);
         assert_eq!("none".parse::<QuicPolicy>().unwrap(), QuicPolicy::Off);
     }
