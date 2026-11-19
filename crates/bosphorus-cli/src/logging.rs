@@ -36,6 +36,9 @@ pub fn init(sink: LogSink) -> Option<WorkerGuard> {
         }
         LogSink::ServiceFile { dir } => {
             let _ = std::fs::create_dir_all(&dir);
+            // G14/B5: service logs may contain sensitive target/SNI metadata;
+            // harden the default %ProgramData% log dir before writing.
+            crate::service::security::harden_default_service_dir(&dir);
             prune_old_logs(&dir, 14);
 
             let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(

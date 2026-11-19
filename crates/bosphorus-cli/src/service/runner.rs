@@ -114,6 +114,10 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
         );
         anyhow::bail!("create profile dir {}: {e}", profile_dir.display());
     }
+    // Best-effort hardening for the default %ProgramData% store (covers
+    // installs/upgrades that predate G14/B5). Custom --profile-dir is untouched.
+    super::security::harden_default_data_tree();
+    super::security::harden_default_service_dir(&profile_dir);
     let result = (|| {
         let (human, key) = crate::netkey::compute();
 
