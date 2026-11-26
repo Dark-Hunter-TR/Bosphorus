@@ -4,6 +4,10 @@
 //! per-target sweep state so multiple short sessions accumulate toward the full
 //! grid instead of restarting from `Probe` every process launch.
 //!
+//! If the exact `<net_key>.json` is missing (NetKey drift), [`load`] adopts the
+//! most recently modified other profile in `dir` and saves it under the new key
+//! so learned state is not orphaned; corrupt/invalid files are never adopted.
+//!
 //! Compatibility: on load, every persisted `StrategyId` is checked against the
 //! live grid. If they are all still present the target is fully restored (and
 //! [`grid_size_at_exhaustion`](crate::profile::TargetState::grid_size_at_exhaustion)
@@ -119,14 +123,63 @@ fn atomic_write_with_tag(path: &Path, bytes: &[u8], tag: &str) -> io::Result<()>
     Ok(())
 }
 
-/// Read `<dir>/<net_key>.json`. `None` if it does not exist, is too large, or
-/// cannot be parsed (a bad file is treated as "start fresh").
+/// Read `<dir>/<net_key>.json`. If that file is missing, adopt the most
+/// recently modified other profile in `dir` and persist it under `net_key` so a
+/// drifting NetKey does not orphan learned state. `None` if unreadable/corrupt,
+/// too large, or no adoptable profile exists.
 pub fn load(dir: &Path, net_key: &str) -> Option<ProfileFile> {
-    let bytes = read_bounded(&profile_path(dir, net_key), MAX_PROFILE_JSON_BYTES).ok()?;
+    let path = profile_path(dir, net_key);
+    match read_bounded(&path, MAX_PROFILE_JSON_BYTES) {
+        Ok(bytes) => match serde_json::from_slice::<ProfileFile>(&bytes) {
+            Ok(f) if f.version == PROFILE_VERSION => Some(f),
+            _ => None,
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => adopt_latest(dir, net_key),
+        Err(_) => None,
+    }
+}
+
+/// Read only the exact `<dir>/<net_key>.json`, without NetKey-drift adoption.
+/// Live rebinds use this: switching networks must never import another
+/// network's learned targets into the new session.
+pub fn load_exact(dir: &Path, net_key: &str) -> Option<ProfileFile> {
+    let bytes = std::fs::read(profile_path(dir, net_key)).ok()?;
     match serde_json::from_slice::<ProfileFile>(&bytes) {
         Ok(f) if f.version == PROFILE_VERSION => Some(f),
         _ => None,
     }
+}
+
+fn adopt_latest(dir: &Path, net_key: &str) -> Option<ProfileFile> {
+    let target = profile_path(dir, net_key);
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == target || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().map_or(true, |(t, _)| modified >= *t) {
+            best = Some((modified, path));
+        }
+    }
+    let (_, path) = best?;
+    let bytes = read_bounded(&path, MAX_PROFILE_JSON_BYTES).ok()?;
+    let mut file = serde_json::from_slice::<ProfileFile>(&bytes).ok()?;
+    if file.version != PROFILE_VERSION {
+        return None;
+    }
+    file.net_key = net_key.to_owned();
+    let _ = save(dir, net_key, &file);
+    Some(file)
 }
 
 pub(crate) fn read_bounded(path: &Path, max: u64) -> io::Result<Vec<u8>> {
@@ -310,5 +363,25 @@ mod tests {
         )
         .unwrap();
         assert!(load(dir.path(), "k").is_none());
+    }
+
+    #[test]
+    fn missing_key_adopts_latest_profile_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = sample();
+        f.targets[0].key = "learned.example".into();
+        save(dir.path(), "oldkey", &f).unwrap();
+
+        let adopted = load(dir.path(), "newkey").expect("adopts orphaned profile on key drift");
+        assert_eq!(adopted.net_key, "newkey");
+        assert_eq!(adopted.targets[0].key, "learned.example");
+        assert!(
+            profile_path(dir.path(), "newkey").is_file(),
+            "migrated profile is persisted under the new key"
+        );
+        assert!(
+            load(dir.path(), "newkey").is_some(),
+            "subsequent loads use the migrated profile"
+        );
     }
 }
