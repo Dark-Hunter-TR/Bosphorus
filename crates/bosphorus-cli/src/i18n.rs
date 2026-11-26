@@ -278,7 +278,9 @@ pub fn err_quic_block_open(e: &str) -> String {
 pub fn engine_finished(packets: u64, kb: u64, dropped: u64, batches: u64) -> String {
     match get() {
         Lang::En => {
-            format!("engine finished: {packets} packets, {kb} KB, {dropped} dropped, {batches} batched")
+            format!(
+                "engine finished: {packets} packets, {kb} KB, {dropped} dropped, {batches} batched"
+            )
         }
         Lang::Tr => {
             format!("motor bitti: {packets} paket, {kb} KB, {dropped} düşürüldü, {batches} yığın")
@@ -296,8 +298,14 @@ pub fn summary_title(grid: usize) -> String {
 /// `Exhausted` row body: "{tried}/{total} strategies tried, NONE succeeded".
 pub fn summary_exhausted(tried: usize, total: usize) -> String {
     match get() {
-        Lang::En => format!("{tried}/{total} strategies tried, {}", t(Msg::NoneExhausted)),
-        Lang::Tr => format!("{tried}/{total} strateji denendi, {}", t(Msg::NoneExhausted)),
+        Lang::En => format!(
+            "{tried}/{total} strategies tried, {}",
+            t(Msg::NoneExhausted)
+        ),
+        Lang::Tr => format!(
+            "{tried}/{total} strateji denendi, {}",
+            t(Msg::NoneExhausted)
+        ),
     }
 }
 
@@ -359,22 +367,32 @@ pub fn svc_last_write(name: &str, secs: u64) -> String {
 
 pub fn preflight_fail(err: &str) -> String {
     match get() {
-        Lang::En => format!("pre-flight WinDivertOpen failed: {err}\n{}", t(Msg::PreflightHvci)),
-        Lang::Tr => format!("ön-kontrol WinDivertOpen başarısız: {err}\n{}", t(Msg::PreflightHvci)),
+        Lang::En => format!(
+            "pre-flight WinDivertOpen failed: {err}\n{}",
+            t(Msg::PreflightHvci)
+        ),
+        Lang::Tr => format!(
+            "ön-kontrol WinDivertOpen başarısız: {err}\n{}",
+            t(Msg::PreflightHvci)
+        ),
     }
 }
 
 pub fn preflight_warn_forced(err: &str) -> String {
     match get() {
         Lang::En => format!("pre-flight WinDivertOpen failed: {err} — continuing anyway (--force)"),
-        Lang::Tr => format!("ön-kontrol WinDivertOpen başarısız: {err} — yine de devam ediliyor (--force)"),
+        Lang::Tr => {
+            format!("ön-kontrol WinDivertOpen başarısız: {err} — yine de devam ediliyor (--force)")
+        }
     }
 }
 
 pub fn svc_created(name: &str) -> String {
     match get() {
         Lang::En => format!("service '{name}' created (LocalSystem, auto-start) and started."),
-        Lang::Tr => format!("'{name}' hizmeti oluşturuldu (LocalSystem, otomatik-başlangıç) ve başlatıldı."),
+        Lang::Tr => {
+            format!("'{name}' hizmeti oluşturuldu (LocalSystem, otomatik-başlangıç) ve başlatıldı.")
+        }
     }
 }
 
@@ -501,11 +519,17 @@ mod tests {
         let _guard = lock_lang();
         set(Lang::En);
         assert!(t(Msg::DiscoveryWarning).starts_with("Bosphorus runs fully automatically"));
-        assert_eq!(engine_finished(1, 2, 3, 4), "engine finished: 1 packets, 2 KB, 3 dropped, 4 batched");
+        assert_eq!(
+            engine_finished(1, 2, 3, 4),
+            "engine finished: 1 packets, 2 KB, 3 dropped, 4 batched"
+        );
 
         set(Lang::Tr);
         assert!(t(Msg::DiscoveryWarning).starts_with("Bosphorus tamamen otomatiktir"));
-        assert_eq!(engine_finished(1, 2, 3, 4), "motor bitti: 1 paket, 2 KB, 3 düşürüldü, 4 yığın");
+        assert_eq!(
+            engine_finished(1, 2, 3, 4),
+            "motor bitti: 1 paket, 2 KB, 3 düşürüldü, 4 yığın"
+        );
 
         set(Lang::En); // don't leak state to other tests
     }

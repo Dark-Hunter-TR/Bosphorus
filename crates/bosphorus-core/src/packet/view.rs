@@ -61,7 +61,16 @@ impl<'a> PacketView<'a> {
         let src_ip = IpAddr::V4(Ipv4Addr::new(raw[12], raw[13], raw[14], raw[15]));
         let dst_ip = IpAddr::V4(Ipv4Addr::new(raw[16], raw[17], raw[18], raw[19]));
         let (l4_hdr, payload) = parse_l4(raw, ihl, protocol)?;
-        Ok(Self { raw, ipv6: false, protocol, ttl, src_ip, dst_ip, l4_hdr, payload })
+        Ok(Self {
+            raw,
+            ipv6: false,
+            protocol,
+            ttl,
+            src_ip,
+            dst_ip,
+            l4_hdr,
+            payload,
+        })
     }
 
     fn parse_v6(raw: &'a [u8]) -> Result<Self, CoreError> {
@@ -83,23 +92,33 @@ impl<'a> PacketView<'a> {
             match next {
                 // Hop-by-Hop(0), Routing(43), Dest-Opts(60): [next, ext_len, ...], (ext_len+1)*8 bytes
                 0 | 43 | 60 => {
-                    let hdr = raw.get(off..off + 2).ok_or(CoreError::Parse("truncated IPv6 ext header"))?;
+                    let hdr = raw
+                        .get(off..off + 2)
+                        .ok_or(CoreError::Parse("truncated IPv6 ext header"))?;
                     let len = (hdr[1] as usize + 1) * 8;
                     next = hdr[0];
-                    off = off.checked_add(len).ok_or(CoreError::Parse("IPv6 ext header overflow"))?;
+                    off = off
+                        .checked_add(len)
+                        .ok_or(CoreError::Parse("IPv6 ext header overflow"))?;
                 }
                 // Fragment(44): fixed 8 bytes
                 44 => {
-                    let hdr = raw.get(off..off + 8).ok_or(CoreError::Parse("truncated IPv6 fragment header"))?;
+                    let hdr = raw
+                        .get(off..off + 8)
+                        .ok_or(CoreError::Parse("truncated IPv6 fragment header"))?;
                     next = hdr[0];
                     off += 8;
                 }
                 // Authentication Header(51): (payload_len+2)*4 bytes
                 51 => {
-                    let hdr = raw.get(off..off + 2).ok_or(CoreError::Parse("truncated AH"))?;
+                    let hdr = raw
+                        .get(off..off + 2)
+                        .ok_or(CoreError::Parse("truncated AH"))?;
                     let len = (hdr[1] as usize + 2) * 4;
                     next = hdr[0];
-                    off = off.checked_add(len).ok_or(CoreError::Parse("AH overflow"))?;
+                    off = off
+                        .checked_add(len)
+                        .ok_or(CoreError::Parse("AH overflow"))?;
                 }
                 _ => break,
             }
@@ -111,7 +130,16 @@ impl<'a> PacketView<'a> {
             return Err(CoreError::Parse("too many IPv6 extension headers"));
         }
         let (l4_hdr, payload) = parse_l4(raw, off, next)?;
-        Ok(Self { raw, ipv6: true, protocol: next, ttl, src_ip, dst_ip, l4_hdr, payload })
+        Ok(Self {
+            raw,
+            ipv6: true,
+            protocol: next,
+            ttl,
+            src_ip,
+            dst_ip,
+            l4_hdr,
+            payload,
+        })
     }
 
     pub fn raw(&self) -> &'a [u8] {
@@ -167,7 +195,9 @@ impl<'a> PacketView<'a> {
         if !self.is_tcp() {
             return None;
         }
-        let b = self.raw.get(self.l4_hdr.start + 8..self.l4_hdr.start + 12)?;
+        let b = self
+            .raw
+            .get(self.l4_hdr.start + 8..self.l4_hdr.start + 12)?;
         Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
     pub fn tcp_flags(&self) -> Option<TcpFlags> {
@@ -209,8 +239,14 @@ impl<'a> PacketView<'a> {
 
 /// Returns `(l4_header_range, payload_range)` for TCP/UDP; for other protocols
 /// the "header" is empty and everything is payload.
-fn parse_l4(raw: &[u8], l4_start: usize, protocol: u8) -> Result<(Range<usize>, Range<usize>), CoreError> {
-    let l4 = raw.get(l4_start..).ok_or(CoreError::Parse("L4 offset past packet"))?;
+fn parse_l4(
+    raw: &[u8],
+    l4_start: usize,
+    protocol: u8,
+) -> Result<(Range<usize>, Range<usize>), CoreError> {
+    let l4 = raw
+        .get(l4_start..)
+        .ok_or(CoreError::Parse("L4 offset past packet"))?;
     match protocol {
         IPPROTO_TCP => {
             if l4.len() < 20 {
@@ -220,7 +256,10 @@ fn parse_l4(raw: &[u8], l4_start: usize, protocol: u8) -> Result<(Range<usize>, 
             if !(20..=l4.len()).contains(&data_off) {
                 return Err(CoreError::Parse("bad TCP data offset"));
             }
-            Ok((l4_start..l4_start + data_off, l4_start + data_off..raw.len()))
+            Ok((
+                l4_start..l4_start + data_off,
+                l4_start + data_off..raw.len(),
+            ))
         }
         IPPROTO_UDP => {
             if l4.len() < 8 {
@@ -275,7 +314,7 @@ mod tests {
         ]);
         p.extend_from_slice(&[0xAA; 32]); // random
         p.push(0x00); // session_id length 0
-        // fix IPv4 total length
+                      // fix IPv4 total length
         let total = p.len() as u16;
         p[2..4].copy_from_slice(&total.to_be_bytes());
         p
@@ -293,7 +332,8 @@ mod tests {
             0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, // src 2001:db8::1
         ]);
         p.extend_from_slice(&[
-            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88, // dst 2001:4860:4860::8888
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88,
+            0x88, // dst 2001:4860:4860::8888
         ]);
         // ---- UDP header (8 bytes) ----
         let udp_start = p.len();
@@ -301,8 +341,10 @@ mod tests {
         p.extend_from_slice(&[0x00, 0x35]); // dst port 53
         p.extend_from_slice(&[0x00, 0x00]); // length (filled below)
         p.extend_from_slice(&[0x00, 0x00]); // checksum (ignored)
-        // ---- DNS query ----
-        p.extend_from_slice(&[0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+                                            // ---- DNS query ----
+        p.extend_from_slice(&[
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
         for label in ["example", "com"] {
             p.push(label.len() as u8);
             p.extend_from_slice(label.as_bytes());

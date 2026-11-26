@@ -11,7 +11,9 @@
 
 use std::time::{Duration, Instant};
 
-use bosphorus_core::{CaptureMeta, Decision, Engine, EvasionConfig, NetPhase, ProfilePaths, SendBatch};
+use bosphorus_core::{
+    CaptureMeta, Decision, Engine, EvasionConfig, NetPhase, ProfilePaths, SendBatch,
+};
 
 pub fn run(n: usize) -> anyhow::Result<()> {
     init_tracing();
@@ -19,7 +21,10 @@ pub fn run(n: usize) -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join("bosphorus-mem-bench");
     let _ = std::fs::remove_dir_all(&dir);
     let cfg = EvasionConfig {
-        profile: Some(ProfilePaths { dir: dir.clone(), net_key: "membench".into() }),
+        profile: Some(ProfilePaths {
+            dir: dir.clone(),
+            net_key: "membench".into(),
+        }),
         ..Default::default()
     };
     let engine = Engine::new(cfg);
@@ -32,7 +37,11 @@ pub fn run(n: usize) -> anyhow::Result<()> {
     let mut next_port = 1025u16;
     let mut port = || {
         let p = next_port;
-        next_port = if next_port >= 60_000 { 1025 } else { next_port + 1 };
+        next_port = if next_port >= 60_000 {
+            1025
+        } else {
+            next_port + 1
+        };
         p
     };
 
@@ -81,7 +90,10 @@ pub fn run(n: usize) -> anyhow::Result<()> {
 
 fn drive(engine: &Engine, pkt: Vec<u8>, outbound: bool) -> Decision {
     let mut p = pkt;
-    let mut meta = CaptureMeta { outbound, ..Default::default() };
+    let mut meta = CaptureMeta {
+        outbound,
+        ..Default::default()
+    };
     let mut out = SendBatch::new();
     engine.process(&mut p, &mut meta, &mut out)
 }
@@ -140,7 +152,10 @@ fn working_set_kib() -> (u64, u64) {
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("bosphorus::mem=debug"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(true).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
 }
 
 // --- synthetic packets (IPv4/TCP, 10.0.0.9 <-> 93.184.216.34:443) ---------
@@ -173,7 +188,9 @@ fn client_hello(host: &str, sport: u16) -> Vec<u8> {
     let mut tls = vec![0x16, 0x03, 0x01];
     tls.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     tls.extend_from_slice(&hs);
-    let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 9, 93, 184, 216, 34];
+    let mut p = vec![
+        0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 9, 93, 184, 216, 34,
+    ];
     p.extend_from_slice(&sport.to_be_bytes());
     p.extend_from_slice(&[0x01, 0xbb]);
     p.extend_from_slice(&1000u32.to_be_bytes());
@@ -185,7 +202,9 @@ fn client_hello(host: &str, sport: u16) -> Vec<u8> {
 }
 
 fn inbound(sport: u16, flags: u8, payload: &[u8]) -> Vec<u8> {
-    let mut p = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 93, 184, 216, 34, 10, 0, 0, 9];
+    let mut p = vec![
+        0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0, 93, 184, 216, 34, 10, 0, 0, 9,
+    ];
     p.extend_from_slice(&[0x01, 0xbb]);
     p.extend_from_slice(&sport.to_be_bytes());
     p.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0x50, flags, 0xff, 0xff, 0, 0, 0, 0]);

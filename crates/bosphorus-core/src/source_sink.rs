@@ -103,7 +103,11 @@ impl SendBatch {
         self.push_op(bytes, meta, ChecksumOp::Recompute);
     }
     pub fn push_op(&mut self, bytes: Vec<u8>, meta: CaptureMeta, checksum: ChecksumOp) {
-        self.items.push(SendItem { bytes, meta, checksum });
+        self.items.push(SendItem {
+            bytes,
+            meta,
+            checksum,
+        });
     }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()

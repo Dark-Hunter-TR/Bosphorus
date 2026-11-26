@@ -50,7 +50,12 @@ fn note_injector_hops(st: &mut FlowState, v: &PacketView<'_>) {
 
 /// Update `st` from an outbound (client -> server) packet. Returns a verdict if
 /// one becomes certain (only `Blackhole`, from ClientHello retransmits).
-pub fn observe_outbound(st: &mut FlowState, v: &PacketView<'_>, now: Instant, tuning: &ConntrackTuning) -> Option<FlowOutcome> {
+pub fn observe_outbound(
+    st: &mut FlowState,
+    v: &PacketView<'_>,
+    now: Instant,
+    tuning: &ConntrackTuning,
+) -> Option<FlowOutcome> {
     st.bytes_out += v.raw().len() as u64;
     if st.outcome.is_some() {
         return None;
@@ -146,7 +151,7 @@ pub fn observe_inbound(
                 && within_grace(st, now, tuning) =>
         {
             note_injector_hops(st, v);
-            return set(st, FlowOutcome::LateReset)
+            return set(st, FlowOutcome::LateReset);
         }
         _ => {}
     }
@@ -160,7 +165,11 @@ fn within_grace(st: &FlowState, now: Instant, tuning: &ConntrackTuning) -> bool 
 }
 
 /// Called periodically by the engine tick. Resolves flows that have gone quiet.
-pub fn resolve_timeout(st: &FlowState, tuning: &ConntrackTuning, now: Instant) -> Option<FlowOutcome> {
+pub fn resolve_timeout(
+    st: &FlowState,
+    tuning: &ConntrackTuning,
+    now: Instant,
+) -> Option<FlowOutcome> {
     if st.outcome.is_some() {
         return None;
     }
@@ -173,7 +182,10 @@ pub fn resolve_timeout(st: &FlowState, tuning: &ConntrackTuning, now: Instant) -
         return None; // still inside the grace window — keep waiting
     }
     if let Some(ch_at) = st.client_hello_at {
-        if !st.server_hello_seen && !st.inbound_rst && now.duration_since(ch_at) >= tuning.verdict_timeout {
+        if !st.server_hello_seen
+            && !st.inbound_rst
+            && now.duration_since(ch_at) >= tuning.verdict_timeout
+        {
             return Some(FlowOutcome::Blackhole);
         }
         return None;
@@ -200,7 +212,9 @@ mod tests {
     const T_RST: u8 = 0x04;
 
     fn v4_tcp(ttl: u8, flags: u8, seq: u32, payload: &[u8]) -> Vec<u8> {
-        let mut p = vec![0x45, 0x00, 0x00, 0x00, 0, 0, 0x40, 0x00, ttl, 0x06, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        let mut p = vec![
+            0x45, 0x00, 0x00, 0x00, 0, 0, 0x40, 0x00, ttl, 0x06, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+        ];
         p.extend_from_slice(&[0x30, 0x39, 0x01, 0xbb]); // ports 12345 -> 443
         p.extend_from_slice(&seq.to_be_bytes());
         p.extend_from_slice(&[0, 0, 0, 0]); // ack
@@ -268,7 +282,10 @@ mod tests {
 
         // Real inbound application data confirms it immediately.
         let ad = v4_tcp(117, T_CH, 3, &app_data());
-        assert_eq!(observe_inbound(&mut st, &view(&ad), now, &t), Some(FlowOutcome::Success));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&ad), now, &t),
+            Some(FlowOutcome::Success)
+        );
         assert_eq!(st.outcome, Some(FlowOutcome::Success));
     }
 
@@ -278,8 +295,21 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        assert_eq!(observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t), None);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        assert_eq!(
+            observe_inbound(
+                &mut st,
+                &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+                now,
+                &t
+            ),
+            None
+        );
 
         // Still inside the grace window: no verdict yet.
         let mid = now + t.app_grace / 2;
@@ -296,12 +326,25 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
 
         let early = now + t.app_grace / 2;
         let rst = v4_tcp(200, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), early, &t), Some(FlowOutcome::LateReset));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), early, &t),
+            Some(FlowOutcome::LateReset)
+        );
         assert_eq!(st.outcome, Some(FlowOutcome::LateReset));
     }
 
@@ -311,13 +354,26 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
 
         // RST arrives only after the grace window: the flow held, this is a close.
         let late = now + t.app_grace + Duration::from_millis(50);
         let rst = v4_tcp(200, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), late, &t), Some(FlowOutcome::Success));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), late, &t),
+            Some(FlowOutcome::Success)
+        );
     }
 
     #[test]
@@ -326,15 +382,36 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
 
         // A warning-level alert (close_notify) inside the grace window is a
         // clean close, not a teardown — no verdict here...
         let mid = now + t.app_grace / 2;
-        assert_eq!(observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 3, &close_notify())), mid, &t), None);
+        assert_eq!(
+            observe_inbound(
+                &mut st,
+                &view(&v4_tcp(117, T_CH, 3, &close_notify())),
+                mid,
+                &t
+            ),
+            None
+        );
         // ...and a following FIN is ignored too.
-        assert_eq!(observe_inbound(&mut st, &view(&v4_tcp(117, T_FIN, 4, &[])), mid, &t), None);
+        assert_eq!(
+            observe_inbound(&mut st, &view(&v4_tcp(117, T_FIN, 4, &[])), mid, &t),
+            None
+        );
         assert_eq!(st.outcome, None);
         // The grace window still resolves it to Success.
         let after = now + t.app_grace + Duration::from_millis(1);
@@ -347,12 +424,27 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
 
         let mid = now + t.app_grace / 2;
         assert_eq!(
-            observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 3, &fatal_alert())), mid, &t),
+            observe_inbound(
+                &mut st,
+                &view(&v4_tcp(117, T_CH, 3, &fatal_alert())),
+                mid,
+                &t
+            ),
             Some(FlowOutcome::LateReset)
         );
     }
@@ -360,7 +452,10 @@ mod tests {
     #[test]
     fn app_grace_is_shorter_than_verdict_timeout() {
         let t = ConntrackTuning::default();
-        assert!(t.app_grace < t.verdict_timeout, "the Blackhole timer must not race the grace window");
+        assert!(
+            t.app_grace < t.verdict_timeout,
+            "the Blackhole timer must not race the grace window"
+        );
     }
 
     #[test]
@@ -370,10 +465,18 @@ mod tests {
         let t = tuning();
 
         observe_inbound(&mut st, &view(&v4_tcp(117, T_SA, 0, &[])), now, &t);
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
 
         let rst = v4_tcp(200, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::DpiReset));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), now, &t),
+            Some(FlowOutcome::DpiReset)
+        );
     }
 
     #[test]
@@ -383,8 +486,14 @@ mod tests {
         let t = tuning();
         observe_inbound(&mut st, &view(&v4_tcp(117, T_SA, 0, &[])), now, &t);
         let rst = v4_tcp(117, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::TlsError));
-        assert_eq!(st.injector_hops, None, "not a DPI verdict, no injector fingerprint taken");
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), now, &t),
+            Some(FlowOutcome::TlsError)
+        );
+        assert_eq!(
+            st.injector_hops, None,
+            "not a DPI verdict, no injector fingerprint taken"
+        );
     }
 
     #[test]
@@ -395,12 +504,20 @@ mod tests {
 
         // Server is 11 hops away (SYN-ACK TTL 117 -> initial 128).
         observe_inbound(&mut st, &view(&v4_tcp(117, T_SA, 0, &[])), now, &t);
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
 
         // The RST itself arrives with TTL 60 -> initial 64 -> only 4 hops away:
         // much closer than the server, the classic in-path-injector signature.
         let rst = v4_tcp(60, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::DpiReset));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), now, &t),
+            Some(FlowOutcome::DpiReset)
+        );
         assert_eq!(st.injector_hops, Some(4));
     }
 
@@ -410,12 +527,25 @@ mod tests {
         let mut st = FlowState::new(now);
         let t = tuning();
 
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
 
         let early = now + t.app_grace / 2;
         let rst = v4_tcp(60, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), early, &t), Some(FlowOutcome::LateReset));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), early, &t),
+            Some(FlowOutcome::LateReset)
+        );
         assert_eq!(st.injector_hops, Some(4));
     }
 
@@ -424,10 +554,18 @@ mod tests {
         let now = Instant::now();
         let mut st = FlowState::new(now);
         let t = tuning();
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 42, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
         // TTL 200: > 32 hops from every common initial (64/128/255) — guess_hops fails.
         let rst = v4_tcp(200, T_RST, 0, &[]);
-        assert_eq!(observe_inbound(&mut st, &view(&rst), now, &t), Some(FlowOutcome::DpiReset));
+        assert_eq!(
+            observe_inbound(&mut st, &view(&rst), now, &t),
+            Some(FlowOutcome::DpiReset)
+        );
         assert_eq!(st.injector_hops, None);
     }
 
@@ -452,10 +590,18 @@ mod tests {
         let start = Instant::now();
         let mut st = FlowState::new(start);
         let t = tuning();
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), start, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            start,
+            &t,
+        );
 
         let later = start + t.verdict_timeout + std::time::Duration::from_millis(1);
-        assert_eq!(resolve_timeout(&st, &t, later), Some(FlowOutcome::Blackhole));
+        assert_eq!(
+            resolve_timeout(&st, &t, later),
+            Some(FlowOutcome::Blackhole)
+        );
     }
 
     #[test]
@@ -463,13 +609,26 @@ mod tests {
         let now = Instant::now();
         let mut st = FlowState::new(now);
         let t = tuning();
-        observe_outbound(&mut st, &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])), now, &t);
-        observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 0, &server_hello())), now, &t);
+        observe_outbound(
+            &mut st,
+            &view(&v4_tcp(64, T_CH, 1, &[0x16, 0x03, 0x01, 0, 5, 0x01])),
+            now,
+            &t,
+        );
+        observe_inbound(
+            &mut st,
+            &view(&v4_tcp(117, T_CH, 0, &server_hello())),
+            now,
+            &t,
+        );
         // App data (well inside the grace window) confirms the Success.
         observe_inbound(&mut st, &view(&v4_tcp(117, T_CH, 3, &app_data())), now, &t);
         assert_eq!(st.outcome, Some(FlowOutcome::Success));
         // A later RST (normal close) must not change the verdict.
-        assert_eq!(observe_inbound(&mut st, &view(&v4_tcp(117, T_RST, 0, &[])), now, &t), None);
+        assert_eq!(
+            observe_inbound(&mut st, &view(&v4_tcp(117, T_RST, 0, &[])), now, &t),
+            None
+        );
         assert_eq!(st.outcome, Some(FlowOutcome::Success));
     }
 }

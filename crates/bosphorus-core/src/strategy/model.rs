@@ -44,7 +44,10 @@ pub struct FragmentSpec {
 impl FragmentSpec {
     /// The classic single-split fragment.
     pub fn one(anchor: SplitAnchor, reverse: bool) -> Self {
-        Self { anchors: vec![anchor], reverse }
+        Self {
+            anchors: vec![anchor],
+            reverse,
+        }
     }
 }
 
@@ -159,14 +162,24 @@ impl DesyncMethod {
     /// handled directly by `apply_strategy`.
     pub(crate) fn parts(&self) -> Option<DesyncParts> {
         let (seq_shift, set_ttl, break_cksum) = match *self {
-            DesyncMethod::WrongSeq { seq_delta, ack_delta } => (Some((seq_delta, ack_delta)), false, false),
+            DesyncMethod::WrongSeq {
+                seq_delta,
+                ack_delta,
+            } => (Some((seq_delta, ack_delta)), false, false),
             DesyncMethod::WrongChecksum => (None, false, true),
             DesyncMethod::TtlLimited => (None, true, false),
-            DesyncMethod::SeqPlusTtl { seq_delta, ack_delta } => (Some((seq_delta, ack_delta)), true, false),
+            DesyncMethod::SeqPlusTtl {
+                seq_delta,
+                ack_delta,
+            } => (Some((seq_delta, ack_delta)), true, false),
             DesyncMethod::ChecksumPlusTtl => (None, true, true),
             DesyncMethod::OverlapDisorder { .. } => return None,
         };
-        Some(DesyncParts { seq_shift, set_ttl, break_cksum })
+        Some(DesyncParts {
+            seq_shift,
+            set_ttl,
+            break_cksum,
+        })
     }
 
     pub(crate) fn is_overlap_disorder(&self) -> bool {
@@ -180,7 +193,10 @@ impl Strategy {
     pub fn m4_fixed() -> Self {
         Self {
             fake: Some(FakeSpec {
-                desync: DesyncMethod::WrongSeq { seq_delta: SEQ_DELTA, ack_delta: ACK_DELTA },
+                desync: DesyncMethod::WrongSeq {
+                    seq_delta: SEQ_DELTA,
+                    ack_delta: ACK_DELTA,
+                },
                 ttl: None,
                 payload: FakePayload::StaticClientHello,
                 repeats: 1,
@@ -214,14 +230,20 @@ impl Strategy {
             Some(f) => {
                 put(1);
                 match f.desync {
-                    DesyncMethod::WrongSeq { seq_delta, ack_delta } => {
+                    DesyncMethod::WrongSeq {
+                        seq_delta,
+                        ack_delta,
+                    } => {
                         put(1);
                         put_i32(&mut put, seq_delta);
                         put_i32(&mut put, ack_delta);
                     }
                     DesyncMethod::WrongChecksum => put(2),
                     DesyncMethod::TtlLimited => put(3),
-                    DesyncMethod::SeqPlusTtl { seq_delta, ack_delta } => {
+                    DesyncMethod::SeqPlusTtl {
+                        seq_delta,
+                        ack_delta,
+                    } => {
                         put(4);
                         put_i32(&mut put, seq_delta);
                         put_i32(&mut put, ack_delta);
@@ -324,7 +346,12 @@ impl Strategy {
             if !s.is_empty() {
                 s.push('+');
             }
-            let joined = fr.anchors.iter().map(SplitAnchor::label).collect::<Vec<_>>().join(",");
+            let joined = fr
+                .anchors
+                .iter()
+                .map(SplitAnchor::label)
+                .collect::<Vec<_>>()
+                .join(",");
             s.push_str(&format!("frag@{joined}"));
             if fr.reverse {
                 s.push_str("(rev)");
@@ -366,7 +393,10 @@ mod tests {
         // Anchor count is part of the id: [2] != [2, 6].
         let mut d = Strategy::m4_fixed();
         d.fragment = Some(FragmentSpec {
-            anchors: vec![SplitAnchor::AbsoluteOffset(2), SplitAnchor::AbsoluteOffset(6)],
+            anchors: vec![
+                SplitAnchor::AbsoluteOffset(2),
+                SplitAnchor::AbsoluteOffset(6),
+            ],
             reverse: false,
         });
         assert_ne!(a.id(), d.id());
@@ -396,12 +426,18 @@ mod tests {
         };
         assert_eq!(multi.describe(), "frag@tls,sni(rev)");
 
-        let padded = Strategy { tls_pad: Some(512), ..multi };
+        let padded = Strategy {
+            tls_pad: Some(512),
+            ..multi
+        };
         assert_eq!(padded.describe(), "frag@tls,sni(rev)+pad(512)");
 
         let overlap = Strategy {
             fake: Some(FakeSpec {
-                desync: DesyncMethod::OverlapDisorder { seqovl: 16, fill: OverlapFill::Zeros },
+                desync: DesyncMethod::OverlapDisorder {
+                    seqovl: 16,
+                    fill: OverlapFill::Zeros,
+                },
                 ttl: None,
                 payload: FakePayload::StaticClientHello,
                 repeats: 1,
@@ -416,10 +452,15 @@ mod tests {
     #[test]
     fn tls_pad_changes_the_id() {
         let a = Strategy::m4_fixed();
-        let b = Strategy { tls_pad: Some(512), ..a.clone() };
+        let b = Strategy {
+            tls_pad: Some(512),
+            ..a.clone()
+        };
         assert_ne!(a.id(), b.id());
-        let c = Strategy { tls_pad: Some(513), ..a };
+        let c = Strategy {
+            tls_pad: Some(513),
+            ..a
+        };
         assert_ne!(b.id(), c.id());
     }
 }
-
