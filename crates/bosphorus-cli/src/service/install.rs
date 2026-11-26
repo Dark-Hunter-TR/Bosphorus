@@ -70,6 +70,13 @@ pub fn install(opts: &Opts) -> anyhow::Result<()> {
     let profile_dir = opts.profile_dir.clone().unwrap_or_else(super::profiles_dir);
     std::fs::create_dir_all(&profile_dir)?;
     std::fs::create_dir_all(super::logs_dir())?;
+    // G14/B5: when using the default %ProgramData% tree, restrict ACLs so
+    // local non-admin users cannot read/tamper with sensitive profile/log data.
+    // Custom --profile-dir paths are left as-is to avoid damaging caller-chosen ACLs.
+    super::security::try_harden_default_service_dir(&super::data_dir())?;
+    super::security::try_harden_default_service_dir(&super::profiles_dir())?;
+    super::security::try_harden_default_service_dir(&super::logs_dir())?;
+    super::security::try_harden_default_service_dir(&profile_dir)?;
 
     let mgr = ServiceManager::local_computer(
         None::<&OsStr>,

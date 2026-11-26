@@ -4,15 +4,20 @@ use std::path::PathBuf;
 
 pub(crate) mod install;
 mod runner;
+pub(crate) mod security;
 pub(crate) mod status;
 pub(crate) mod uninstall;
 
 pub const SERVICE_NAME: &str = "Bosphorus";
 pub const SERVICE_DISPLAY: &str = "Bosphorus DPI Bypass";
 
-/// `%ProgramData%\Bosphorus` — writable by SYSTEM, readable by everyone. The
-/// service must not use `%LOCALAPPDATA%` (that resolves under
+/// `%ProgramData%\Bosphorus` root for service state (profiles/logs).
+///
+/// The service must not use `%LOCALAPPDATA%` (that resolves under
 /// `C:\Windows\System32\config\systemprofile` for the SYSTEM account).
+/// When using this default tree, callers must harden its ACL (see
+/// [`security`]) because profile/log data may contain sensitive target/SNI
+/// metadata and can influence service behavior.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("ProgramData")
         .map(PathBuf::from)
