@@ -433,7 +433,7 @@ impl Engine {
         let Some(strat) = strat else {
             tracing::info!(
                 target: "bosphorus::discovery",
-                server = %target, kind = ?trial.kind,
+                server = %redacted_target(&target), kind = ?trial.kind,
                 "passthrough (control / not blocked)"
             );
             return Decision::ForwardOriginal;
@@ -466,7 +466,7 @@ impl Engine {
                 // the ClientHello unchanged this time.
                 tracing::debug!(
                     target: "bosphorus::strategy",
-                    server = %target, strategy = %strat.describe(), error = %e,
+                    server = %redacted_target(&target), strategy = %strat.describe(), error = %e,
                     "candidate unbuildable for this target; skipping it"
                 );
                 if self.forced.is_none() {
@@ -487,7 +487,7 @@ impl Engine {
     fn log_applied(&self, target: &str, strat: &Strategy, kind: TrialKind, parts: usize) {
         tracing::info!(
             target: "bosphorus::strategy",
-            server = %target,
+            server = %redacted_target(target),
             strategy = %strat.describe(),
             ?kind,
             parts,
@@ -862,7 +862,7 @@ impl Engine {
         for t in &working {
             tracing::info!(
                 target: "bosphorus::discovery",
-                key = %t.key,
+                key = %redacted_target(&t.key),
                 phase = ?t.phase,
                 tried = t.tried,
                 total = t.total,
@@ -885,7 +885,8 @@ fn sni_target(payload: &[u8]) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-fn log_discovery(_target: &str, ev: &DiscoveryEvent, phase: NetPhase) {
+fn log_discovery(target: &str, ev: &DiscoveryEvent, phase: NetPhase) {
+    let target = redacted_target(target);
     match ev {
         DiscoveryEvent::Noted => {}
         DiscoveryEvent::Exhausted { tried } => tracing::warn!(
@@ -896,10 +897,20 @@ fn log_discovery(_target: &str, ev: &DiscoveryEvent, phase: NetPhase) {
         ),
         _ => tracing::info!(
             target: "bosphorus::discovery",
-            server = %_target, ?phase, event = ?ev,
+            server = %target, ?phase, event = ?ev,
             "discovery update"
         ),
     }
+}
+
+fn redacted_target(target: &str) -> String {
+    // B5: avoid leaking visited hostnames/SNI in logs/profiles-adjacent telemetry.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in target.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("host#{h:016x}")
 }
 
 /// Apply each item's checksum op, then inject the batch in order.
@@ -965,9 +976,12 @@ fn note_if_censored(censored: &CensoredIps, key: &FlowKey, outcome: FlowOutcome,
 }
 
 fn log_outcome(key: &FlowKey, server_name: Option<&str>, outcome: FlowOutcome, via: &str) {
+    let server = server_name
+        .map(redacted_target)
+        .unwrap_or_else(|| "?".to_owned());
     tracing::info!(
         target: "bosphorus::conntrack",
-        server = server_name.unwrap_or("?"),
+        server = %server,
         server_ip = %key.server_ip,
         client_port = key.client_port,
         ?outcome,
@@ -2253,5 +2267,16 @@ mod tests {
         assert_eq!(stats.dropped, 1);
         assert_eq!(stats.injected, 1);
         assert_eq!(sink.injected, vec![vec![4, 5, 6]]);
+    }
+
+    #[test]
+    fn redacted_target_hides_hostname() {
+        let a = super::redacted_target("updates.discord.com");
+        let b = super::redacted_target("updates.discord.com");
+        let c = super::redacted_target("example.com");
+        assert_eq!(a, b, "stable for same input");
+        assert_ne!(a, c, "differs across targets");
+        assert!(!a.contains("discord"), "must not leak hostname");
+        assert!(a.starts_with("host#"), "expected redacted marker");
     }
 }
