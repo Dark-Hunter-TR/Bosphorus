@@ -33,6 +33,14 @@ jobs:
         with:
           workspaces: ". -> target"
 
+      # B12: fail the build on formatting drift and lint errors instead of
+      # letting them accumulate until a manual cleanup PR is needed.
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --locked
+
       # assets/ is git-ignored (see .gitignore + README "Building from
       # source"). Fetch the same official basil00/WinDivert v2.2.2 binaries a
       # human contributor would download by hand, and unpack them to the exact

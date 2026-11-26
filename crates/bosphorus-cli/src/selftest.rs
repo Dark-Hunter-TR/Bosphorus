@@ -42,6 +42,14 @@ pub fn run_all() -> anyhow::Result<()> {
     println!("{v2}");
     println!("{v3}");
     println!("=======================================================================");
+    if [&v4, &v1, &v2, &v3]
+        .iter()
+        .any(|s| s.contains("FAIL") || s.contains("PARTIAL"))
+    {
+        return Err(anyhow::anyhow!(
+            "M0 selftest: one or more checks reported FAIL/PARTIAL (see summary above)"
+        ));
+    }
     Ok(())
 }
 
@@ -56,7 +64,9 @@ fn open(filter: &str, flags: OpenFlags) -> anyhow::Result<WinDivertHandle> {
         Err(DivertError::Open(e)) => {
             let hint = match e.0 {
                 5 => "ERROR_ACCESS_DENIED — elevated (Yonetici) PowerShell'den calistirin",
-                2 => "ERROR_FILE_NOT_FOUND — WinDivert64.sys, WinDivert.dll ile ayni klasorde degil",
+                2 => {
+                    "ERROR_FILE_NOT_FOUND — WinDivert64.sys, WinDivert.dll ile ayni klasorde degil"
+                }
                 87 => "ERROR_INVALID_PARAMETER — filtre string'i reddedildi",
                 577 => "ERROR_INVALID_IMAGE_HASH — surucu imzasi reddedildi (Secure Boot / imza)",
                 1275 => "ERROR_DRIVER_BLOCKED — surucu politika ile engellendi",
@@ -80,7 +90,8 @@ where
     let jh = std::thread::spawn(move || worker(&hc));
     std::thread::sleep(Duration::from_secs(secs));
     let _ = h.shutdown_both();
-    jh.join().map_err(|_| anyhow::anyhow!("capture worker panicked"))
+    jh.join()
+        .map_err(|_| anyhow::anyhow!("capture worker panicked"))
 }
 
 /// Minimal L3/L4 walk. IPv6 extension headers are not followed (fine for
@@ -218,8 +229,9 @@ fn v4_driver_load() -> String {
     drop(h);
     match ver {
         Ok((maj, min)) => {
-            let s =
-                format!("V4: OK — WinDivert {maj}.{min} yuklendi, get_param calisti, temiz kapandi");
+            let s = format!(
+                "V4: OK — WinDivert {maj}.{min} yuklendi, get_param calisti, temiz kapandi"
+            );
             println!("{s}\n");
             s
         }
@@ -352,7 +364,10 @@ fn v1_inbound_first_segment() -> String {
     println!("    TLS CCS       (14 03 0X) : {ccs}");
     println!("    non-TLS / bilinmeyen     : {nontls_n}");
     for b in &hs {
-        println!("      [handshake ornek] {:02x} {:02x} {:02x} {:02x}", b[0], b[1], b[2], b[3]);
+        println!(
+            "      [handshake ornek] {:02x} {:02x} {:02x} {:02x}",
+            b[0], b[1], b[2], b[3]
+        );
     }
     for b in &nontls {
         println!(
@@ -379,7 +394,9 @@ fn v1_inbound_first_segment() -> String {
 // ---------------------------------------------------------------------------
 
 fn v2_outbound_clienthello_sizes() -> String {
-    println!("--- V2: outbound 443 ClientHello segment boyutlari / LSO var mi? ({WINDOW_SECS}s) ---");
+    println!(
+        "--- V2: outbound 443 ClientHello segment boyutlari / LSO var mi? ({WINDOW_SECS}s) ---"
+    );
     let filter = "outbound and tcp and tcp.DstPort == 443 and tcp.PayloadLength > 0";
     let h = match open(filter, OpenFlags::new().sniff()) {
         Ok(h) => h,
@@ -409,7 +426,11 @@ fn v2_outbound_clienthello_sizes() -> String {
                         over_mtu += 1;
                     }
                     let p = &r.data[l4.payload_off..];
-                    if p.len() >= 3 && p[0] == 0x16 && p[1] == 0x03 && (p[2] == 0x01 || p[2] == 0x03) {
+                    if p.len() >= 3
+                        && p[0] == 0x16
+                        && p[1] == 0x03
+                        && (p[2] == 0x01 || p[2] == 0x03)
+                    {
                         ch_sizes.push(p.len());
                     }
                 }
@@ -432,8 +453,8 @@ fn v2_outbound_clienthello_sizes() -> String {
         }
     };
     if total == 0 {
-        let s =
-            "V2: NO DATA — outbound 443 verisi gorulmedi (tarayicida yeni siteler acin)".to_string();
+        let s = "V2: NO DATA — outbound 443 verisi gorulmedi (tarayicida yeni siteler acin)"
+            .to_string();
         println!("{s}\n");
         return s;
     }

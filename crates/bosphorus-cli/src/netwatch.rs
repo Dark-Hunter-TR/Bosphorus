@@ -34,7 +34,9 @@ impl NetWatch {
     /// Start watching. `on_change` runs on an OS thread-pool thread on every
     /// route / unicast-address change — keep it trivial.
     pub fn start(on_change: impl Fn() + Send + Sync + 'static) -> io::Result<NetWatch> {
-        let ctx = Box::new(Ctx { on_change: Box::new(on_change) });
+        let ctx = Box::new(Ctx {
+            on_change: Box::new(on_change),
+        });
         let ctx_ptr = &*ctx as *const Ctx as *const c_void;
 
         let mut route_handle = HANDLE::default();
@@ -69,7 +71,11 @@ impl NetWatch {
             }
         }
 
-        Ok(NetWatch { route_handle, addr_handle, _ctx: ctx })
+        Ok(NetWatch {
+            route_handle,
+            addr_handle,
+            _ctx: ctx,
+        })
     }
 }
 

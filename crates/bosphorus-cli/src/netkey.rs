@@ -171,7 +171,10 @@ mod tests {
         assert_eq!(mask_to_prefix("255.255.240.0"), Some(20));
         assert_eq!(mask_to_prefix("0.0.0.0"), Some(0));
         assert_eq!(mask_to_prefix("255.0.255.0"), None); // non-contiguous
-        assert_eq!(apply_mask("192.168.1.37", "255.255.255.0").as_deref(), Some("192.168.1.0"));
+        assert_eq!(
+            apply_mask("192.168.1.37", "255.255.255.0").as_deref(),
+            Some("192.168.1.0")
+        );
     }
 
     #[test]

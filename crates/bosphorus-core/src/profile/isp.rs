@@ -286,7 +286,10 @@ mod tests {
         );
         pool.merge_session(
             "net2",
-            &[(b.id(), score(b.clone(), 5, 2)), (c.id(), score(c.clone(), 5, 3))],
+            &[
+                (b.id(), score(b.clone(), 5, 2)),
+                (c.id(), score(c.clone(), 5, 3)),
+            ],
             1,
         );
 
@@ -300,8 +303,22 @@ mod tests {
         let (a, b) = (g.all()[0].clone(), g.all()[1].clone());
         let mut pool = IspPool::new("acme");
         // b on 3 networks, a on 2 — both pass the ratio gate.
-        pool.merge_session("n1", &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))], 1);
-        pool.merge_session("n2", &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))], 1);
+        pool.merge_session(
+            "n1",
+            &[
+                (a.id(), score(a.clone(), 4, 3)),
+                (b.id(), score(b.clone(), 4, 3)),
+            ],
+            1,
+        );
+        pool.merge_session(
+            "n2",
+            &[
+                (a.id(), score(a.clone(), 4, 3)),
+                (b.id(), score(b.clone(), 4, 3)),
+            ],
+            1,
+        );
         pool.merge_session("n3", &[(b.id(), score(b.clone(), 4, 3))], 1);
         assert_eq!(
             pool.seeds(),
@@ -389,15 +406,30 @@ mod tests {
         pool.merge_session("netB", &[(a.id(), score(a.clone(), 4, 3))], 1);
         pool.merge_session(
             "netA",
-            &[(a.id(), score(a.clone(), 4, 3)), (b.id(), score(b.clone(), 4, 3))],
+            &[
+                (a.id(), score(a.clone(), 4, 3)),
+                (b.id(), score(b.clone(), 4, 3)),
+            ],
             2,
         );
         // netA drops a (failed/not promoted) but keeps b; netB's evidence for a remains.
         pool.merge_session("netA", &[(b.id(), score(b.clone(), 5, 4))], 3);
-        let ea = pool.entries.iter().find(|e| e.strategy.id() == a.id()).unwrap();
-        assert_eq!(ea.contributions.len(), 1, "only netB remains for dropped strategy");
+        let ea = pool
+            .entries
+            .iter()
+            .find(|e| e.strategy.id() == a.id())
+            .unwrap();
+        assert_eq!(
+            ea.contributions.len(),
+            1,
+            "only netB remains for dropped strategy"
+        );
         assert_eq!(ea.contributions[0].net_key, "netB");
-        let eb = pool.entries.iter().find(|e| e.strategy.id() == b.id()).unwrap();
+        let eb = pool
+            .entries
+            .iter()
+            .find(|e| e.strategy.id() == b.id())
+            .unwrap();
         assert_eq!(eb.contributions.len(), 1);
         let (t, s, _) = eb.totals();
         assert_eq!((t, s), (5, 4));

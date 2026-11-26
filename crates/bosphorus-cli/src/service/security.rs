@@ -148,10 +148,8 @@ mod tests {
         // Never harden a real shared directory: the protected DACL would lock
         // the current user out of %TEMP%. Use a missing path; the call must
         // stay panic-free on every platform.
-        let missing = std::env::temp_dir().join(format!(
-            "bosphorus-g14-missing-{}",
-            std::process::id()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("bosphorus-g14-missing-{}", std::process::id()));
         let _ = harden_dir(&missing);
     }
 

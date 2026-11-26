@@ -12,7 +12,7 @@ pub mod transforms;
 
 pub use generator::{DefaultGenerator, DesyncKind, GridAxes};
 pub use model::{
-    DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder, SplitAnchor, Strategy,
-    StrategyId, TtlPolicy, ACK_DELTA, SEQ_DELTA,
+    DesyncMethod, FakePayload, FakeSpec, FragmentSpec, OverlapFill, SendOrder, SplitAnchor,
+    Strategy, StrategyId, TtlPolicy, ACK_DELTA, SEQ_DELTA,
 };
 pub use transforms::{apply_strategy, resolve_ttl, Disposition, TransformCtx, FAKE_HTTPS_REQUEST};

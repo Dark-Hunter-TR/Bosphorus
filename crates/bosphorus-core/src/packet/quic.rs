@@ -95,7 +95,11 @@ pub fn parse_long_header(payload: &[u8]) -> Option<LongHeader> {
         _ => QuicPacketKind::UnknownVersion,
     };
 
-    Some(LongHeader { version, kind, dcid_len })
+    Some(LongHeader {
+        version,
+        kind,
+        dcid_len,
+    })
 }
 
 /// Whether this datagram is a client opening a QUIC connection.
@@ -139,15 +143,24 @@ mod tests {
     #[test]
     fn v1_handshake_and_zero_rtt_are_not_connection_attempts() {
         let zero_rtt = long_header(0xD0, VERSION_1);
-        assert_eq!(parse_long_header(&zero_rtt).unwrap().kind, QuicPacketKind::ZeroRtt);
+        assert_eq!(
+            parse_long_header(&zero_rtt).unwrap().kind,
+            QuicPacketKind::ZeroRtt
+        );
         assert!(!is_connection_attempt(&zero_rtt));
 
         let handshake = long_header(0xE0, VERSION_1);
-        assert_eq!(parse_long_header(&handshake).unwrap().kind, QuicPacketKind::Handshake);
+        assert_eq!(
+            parse_long_header(&handshake).unwrap().kind,
+            QuicPacketKind::Handshake
+        );
         assert!(!is_connection_attempt(&handshake));
 
         let retry = long_header(0xF0, VERSION_1);
-        assert_eq!(parse_long_header(&retry).unwrap().kind, QuicPacketKind::Retry);
+        assert_eq!(
+            parse_long_header(&retry).unwrap().kind,
+            QuicPacketKind::Retry
+        );
         assert!(!is_connection_attempt(&retry));
     }
 
@@ -155,11 +168,17 @@ mod tests {
     fn v2_uses_its_own_type_numbering() {
         // The bits that mean Initial in v1 mean Retry in v2, and vice versa.
         let v2_initial = long_header(0xD0, VERSION_2);
-        assert_eq!(parse_long_header(&v2_initial).unwrap().kind, QuicPacketKind::Initial);
+        assert_eq!(
+            parse_long_header(&v2_initial).unwrap().kind,
+            QuicPacketKind::Initial
+        );
         assert!(is_connection_attempt(&v2_initial));
 
         let v2_retry = long_header(0xC0, VERSION_2);
-        assert_eq!(parse_long_header(&v2_retry).unwrap().kind, QuicPacketKind::Retry);
+        assert_eq!(
+            parse_long_header(&v2_retry).unwrap().kind,
+            QuicPacketKind::Retry
+        );
         assert!(!is_connection_attempt(&v2_retry));
     }
 
@@ -174,7 +193,10 @@ mod tests {
     #[test]
     fn version_negotiation_is_server_sent_and_never_an_attempt() {
         let vn = long_header(0xC0, 0);
-        assert_eq!(parse_long_header(&vn).unwrap().kind, QuicPacketKind::VersionNegotiation);
+        assert_eq!(
+            parse_long_header(&vn).unwrap().kind,
+            QuicPacketKind::VersionNegotiation
+        );
         assert!(!is_connection_attempt(&vn));
     }
 
@@ -182,7 +204,10 @@ mod tests {
     fn a_greased_fixed_bit_still_parses() {
         // RFC 9287 lets the 0x40 bit be zero once both ends agreed to grease it.
         let greased = long_header(0x80, VERSION_1);
-        assert_eq!(parse_long_header(&greased).unwrap().kind, QuicPacketKind::Initial);
+        assert_eq!(
+            parse_long_header(&greased).unwrap().kind,
+            QuicPacketKind::Initial
+        );
     }
 
     #[test]

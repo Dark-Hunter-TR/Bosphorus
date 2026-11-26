@@ -1712,8 +1712,16 @@ mod tests {
             ..Default::default()
         };
         let old = Engine::new(cfg_old);
-        old.process(&mut ch_with_sni("learned.example", 54001), &mut out_meta(), &mut SendBatch::new());
-        old.process(&mut inbound_rst(54001), &mut in_meta(), &mut SendBatch::new());
+        old.process(
+            &mut ch_with_sni("learned.example", 54001),
+            &mut out_meta(),
+            &mut SendBatch::new(),
+        );
+        old.process(
+            &mut inbound_rst(54001),
+            &mut in_meta(),
+            &mut SendBatch::new(),
+        );
         old.persist_now();
         assert!(crate::profile::persist::profile_path(dir.path(), "oldkey").exists());
 
@@ -1726,7 +1734,10 @@ mod tests {
         };
         let fresh = Engine::new(cfg_new);
         assert!(
-            fresh.discovery_summary().iter().any(|t| t.key == "learned.example"),
+            fresh
+                .discovery_summary()
+                .iter()
+                .any(|t| t.key == "learned.example"),
             "startup adopts the orphaned profile after NetKey drift"
         );
     }
@@ -2256,11 +2267,19 @@ mod tests {
             }
         }
 
-        let mut src = VecSource { packets: vec![(vec![1, 2, 3], true), (vec![4, 5, 6], true)], idx: 0 };
-        let mut sink = PanicOnceSink { panicked: Cell::new(false), injected: Vec::new() };
+        let mut src = VecSource {
+            packets: vec![(vec![1, 2, 3], true), (vec![4, 5, 6], true)],
+            idx: 0,
+        };
+        let mut sink = PanicOnceSink {
+            panicked: Cell::new(false),
+            injected: Vec::new(),
+        };
         let engine = Engine::new(EvasionConfig::default());
 
-        let stats = engine.run_main(&mut src, &mut sink, &StopFlag::new()).unwrap();
+        let stats = engine
+            .run_main(&mut src, &mut sink, &StopFlag::new())
+            .unwrap();
 
         assert_eq!(stats.packets, 2);
         assert_eq!(stats.panics, 1);

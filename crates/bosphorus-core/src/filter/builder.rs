@@ -263,7 +263,10 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("dns_upstream"), "msg: {msg}");
         assert!(msg.contains("not supported"), "msg: {msg}");
-        assert!(msg.contains("UDP/53 redirect is not implemented"), "msg: {msg}");
+        assert!(
+            msg.contains("UDP/53 redirect is not implemented"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
