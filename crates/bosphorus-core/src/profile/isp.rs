@@ -127,7 +127,7 @@ impl IspPool {
         None
     }
 
-    /// Atomic write (per-process staging file + last-writer-wins rename — see
+    /// Atomic write (per-attempt staging file + last-writer-wins rename — see
     /// [`atomic_write`]). Returns the JSON byte count.
     pub fn save(&self, dir: &Path) -> std::io::Result<usize> {
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
