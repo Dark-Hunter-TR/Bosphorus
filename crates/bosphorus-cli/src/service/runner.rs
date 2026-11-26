@@ -1,6 +1,6 @@
 //! `bosphorus service run` — the SCM entry point. Not for interactive use.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -237,18 +237,15 @@ pub struct ServiceArgs {
 }
 
 fn parse_args(args: &[OsString]) -> ServiceArgs {
-    let s: Vec<String> = args
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect();
-    let lang = pos_value(&s, "--lang")
+    let lang = pos_value(args, "--lang")
+        .and_then(|s| s.to_str())
         .and_then(crate::i18n::parse)
         .unwrap_or(crate::i18n::Lang::En);
     // Unlike the interactive CLI, a bad value here must not stop the service
     // from starting: this argv was written by our own installer, so a bad one
     // is our bug, and refusing to start would take the user's whole bypass down
     // over a spelling. The Event Log keeps the breadcrumb.
-    let quic = match pos_value(&s, "--quic") {
+    let quic = match pos_value(args, "--quic").and_then(|s| s.to_str()) {
         Some(v) => v.parse().unwrap_or_else(|e| {
             eventlog::error(
                 eventlog::ID_BAD_ARGUMENT,
@@ -260,17 +257,17 @@ fn parse_args(args: &[OsString]) -> ServiceArgs {
     };
     ServiceArgs {
         lang,
-        enable_overlap: s.iter().any(|a| a == "--enable-overlap"),
+        enable_overlap: args.iter().any(|a| a == OsStr::new("--enable-overlap")),
         quic,
-        profile_dir: pos_value(&s, "--profile-dir").map(PathBuf::from),
+        profile_dir: pos_value(args, "--profile-dir").map(PathBuf::from),
     }
 }
 
-fn pos_value<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
+fn pos_value<'a>(args: &'a [OsString], key: &str) -> Option<&'a OsStr> {
     args.iter()
-        .position(|a| a == key)
+        .position(|a| a.as_os_str() == OsStr::new(key))
         .and_then(|i| args.get(i + 1))
-        .map(String::as_str)
+        .map(OsString::as_os_str)
 }
 
 #[cfg(test)]
@@ -328,8 +325,12 @@ mod tests {
 
     #[test]
     fn pos_value_returns_following_token_or_none() {
-        let s = vec!["--a".to_string(), "1".to_string(), "--b".to_string()];
-        assert_eq!(pos_value(&s, "--a"), Some("1"));
+        let s = vec![
+            OsString::from("--a"),
+            OsString::from("1"),
+            OsString::from("--b"),
+        ];
+        assert_eq!(pos_value(&s, "--a"), Some(OsStr::new("1")));
         assert_eq!(pos_value(&s, "--b"), None); // last token, nothing after
         assert_eq!(pos_value(&s, "--c"), None); // absent
     }

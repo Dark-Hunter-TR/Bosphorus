@@ -319,7 +319,7 @@ pub fn show_uninstall_result(res: &anyhow::Result<()>) {
 fn elevate(args: Vec<OsString>, hidden: bool) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let params = shell_parameters(&args);
-    let exe_w = wide(&exe.to_string_lossy());
+    let exe_w = wide_os(exe.as_os_str());
     let params_w = wide(&params);
     let show = if hidden { SW_HIDE } else { SW_SHOWNORMAL };
     // SAFETY: both wide strings are NUL-terminated and outlive the call; a null
@@ -872,6 +872,18 @@ fn error_box(body: &str) {
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn wide_os(s: &std::ffi::OsStr) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+    #[cfg(not(windows))]
+    {
+        wide(&s.to_string_lossy())
+    }
 }
 
 #[cfg(test)]
