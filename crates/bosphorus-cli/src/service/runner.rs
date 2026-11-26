@@ -180,11 +180,19 @@ fn run_service(arguments: Vec<OsString>) -> anyhow::Result<()> {
             });
         }
 
-        let _netwatch = crate::netwatch::NetWatch::start({
+        let _netwatch = match crate::netwatch::NetWatch::start({
             let engine = Arc::clone(&engine);
             move || engine.mark_netkey_dirty()
-        })
-        .ok();
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eventlog::warn(
+                    eventlog::ID_OPEN_FAILED,
+                    &format!("NetWatch unavailable: {e}; network switches won't be auto-detected"),
+                );
+                None
+            }
+        };
 
         set_state(
             ServiceState::Running,
