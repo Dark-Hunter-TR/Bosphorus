@@ -416,13 +416,6 @@ pub fn check_filters() -> anyhow::Result<()> {
         // defaults happen to build.
         ("quic=off", EvasionConfig { quic: QuicPolicy::Off, ..Default::default() }),
         ("quic=all", EvasionConfig { quic: QuicPolicy::All, ..Default::default() }),
-        (
-            "dns-upstream=9.9.9.9",
-            EvasionConfig {
-                dns_upstream: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9))),
-                ..Default::default()
-            },
-        ),
     ] {
         let f = filter::build(&cfg).map_err(|e| anyhow::anyhow!("build ({label}): {e}"))?;
         println!("[{label}] main:");
@@ -444,6 +437,18 @@ pub fn check_filters() -> anyhow::Result<()> {
             }
         }
         println!();
+    }
+
+    let dns_cfg = EvasionConfig {
+        dns_upstream: Some("9.9.9.9".parse().unwrap()),
+        ..Default::default()
+    };
+    match filter::build(&dns_cfg) {
+        Ok(_) => {
+            any_err = true;
+            println!("[dns-upstream] -> unexpectedly accepted");
+        }
+        Err(e) => println!("[dns-upstream] correctly rejected: {e}"),
     }
 
     if any_err {

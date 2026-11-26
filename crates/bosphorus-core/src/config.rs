@@ -44,9 +44,9 @@ pub struct EvasionConfig {
     /// `[443]` by the filter builder.
     pub tls_ports: Vec<u16>,
 
-    /// When `Some`, `udp/53` is added to the capture filter and DNS is
-    /// redirected to this address (M10). When `None`, DNS is never touched
-    /// (only poisoning detection is logged).
+    /// Not supported: UDP/53 redirect is not implemented, so `filter::build`
+    /// rejects a `Some` value instead of capturing DNS without rewriting it.
+    /// Keep as `None`.
     pub dns_upstream: Option<IpAddr>,
 
     /// What to do about HTTP/3. See [`QuicPolicy`].
