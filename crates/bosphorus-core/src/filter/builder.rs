@@ -142,6 +142,10 @@ mod tests {
         assert!(s.contains("udp.PayloadLength >= 1200"));
         assert!(s.contains("udp.Payload[0] >= 0x80"));
         assert!(
+            !s.contains("udp.Payload[0] >= 0xC0"),
+            "the fixed-bit requirement would miss greased Initials"
+        );
+        assert!(
             !s.contains("udp.Payload32[1b]"),
             "the version pin would miss QUIC v2 and the drafts"
         );
@@ -163,6 +167,25 @@ mod tests {
             !s.contains("udp.Payload[0] >= 0xC0"),
             "the fixed-bit requirement would miss greased Initials: {s}"
         );
+    }
+
+    #[test]
+    fn selective_quic_covers_all_configured_tls_ports() {
+        let cfg = EvasionConfig {
+            tls_ports: vec![443, 9443],
+            ..Default::default()
+        };
+        let s = build(&cfg).unwrap().main.into_string().unwrap();
+        assert!(s.contains("udp.DstPort == 443"), "missing 443: {s}");
+        assert!(
+            s.contains("udp.DstPort == 9443"),
+            "missing custom port: {s}"
+        );
+        assert!(
+            !s.contains("udp.DstPort == 2083"),
+            "default ports leaked: {s}"
+        );
+        assert_eq!(count(&s, '('), count(&s, ')'));
     }
 
     #[test]
@@ -193,8 +216,36 @@ mod tests {
             "the version pin would miss QUIC v2 and the drafts"
         );
         for p in [443u16, 2053, 2083, 2087, 2096, 8443] {
-            assert!(drop.contains(&format!("udp.DstPort == {p}")), "blanket drop missing {p}: {drop}");
+            assert!(
+                drop.contains(&format!("udp.DstPort == {p}")),
+                "blanket drop missing {p}: {drop}"
+            );
         }
+        assert_eq!(count(&drop, '('), count(&drop, ')'));
+    }
+
+    #[test]
+    fn quic_all_drop_covers_custom_tls_ports() {
+        let cfg = EvasionConfig {
+            quic: QuicPolicy::All,
+            tls_ports: vec![443, 9443],
+            ..Default::default()
+        };
+        let drop = build(&cfg)
+            .unwrap()
+            .quic_drop
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(drop.contains("udp.DstPort == 443"), "missing 443: {drop}");
+        assert!(
+            drop.contains("udp.DstPort == 9443"),
+            "missing custom port: {drop}"
+        );
+        assert!(
+            !drop.contains("udp.DstPort == 2083"),
+            "default ports leaked: {drop}"
+        );
         assert_eq!(count(&drop, '('), count(&drop, ')'));
     }
 
