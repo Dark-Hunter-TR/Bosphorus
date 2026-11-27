@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "bosphorus-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bosphorus-core",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "bosphorus-core"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "arc-swap",
  "parking_lot",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "bosphorus-divert"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "thiserror 1.0.69",
  "windivert-sys",
